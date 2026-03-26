@@ -950,10 +950,11 @@ export function Inbox() {
         return;
       }
 
+      // Keyboard shortcuts are only active on the "mine" tab
+      if (tab !== "mine") return;
+
       const itemCount = workItemsToRender.length;
       if (itemCount === 0) return;
-
-      const isMineTab = tab === "mine";
 
       switch (e.key) {
         case "j": {
@@ -968,7 +969,7 @@ export function Inbox() {
         }
         case "a":
         case "y": {
-          if (!isMineTab || selectedIndex < 0 || selectedIndex >= itemCount) return;
+          if (selectedIndex < 0 || selectedIndex >= itemCount) return;
           e.preventDefault();
           const item = workItemsToRender[selectedIndex];
           const key = getWorkItemKey(item);
