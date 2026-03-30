@@ -76,6 +76,38 @@ The `ui` package uses [`scripts/generate-ui-package-json.mjs`](../scripts/genera
 
 After packing or publishing, `postpack` restores the development manifest automatically.
 
+### Manual first publish for `@paperclipai/ui`
+
+If you need to publish only the UI package once by hand, use the real package name:
+
+- `@paperclipai/ui`
+
+Recommended flow from the repo root:
+
+```bash
+# optional sanity check: this 404s until the first publish exists
+npm view @paperclipai/ui version
+
+# make sure the dist payload is fresh
+pnpm --filter @paperclipai/ui build
+
+# confirm your local npm auth before the real publish
+npm whoami
+
+# safe preview of the exact publish payload
+cd ui
+pnpm publish --dry-run --no-git-checks --access public
+
+# real publish
+pnpm publish --no-git-checks --access public
+```
+
+Notes:
+
+- Publish from `ui/`, not the repo root.
+- `prepack` automatically rewrites `ui/package.json` to the lean publish manifest, and `postpack` restores the dev manifest after the command finishes.
+- If `npm view @paperclipai/ui version` already returns the same version that is in [`ui/package.json`](../ui/package.json), do not republish. Bump the version or use the normal repo-wide release flow in [`scripts/release.sh`](../scripts/release.sh).
+
 ## Version formats
 
 Paperclip uses calendar versions:
