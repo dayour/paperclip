@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type Ref } from "react";
 import { pickTextColorForPillBg } from "@/lib/color-contrast";
 import { Link, useLocation, useNavigate, useNavigationType, useParams } from "@/lib/router";
-import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient, type InfiniteData, type QueryClient } from "@tanstack/react-query";
 import { issuesApi } from "../api/issues";
 import { approvalsApi } from "../api/approvals";
 import { activityApi, type RunForIssue } from "../api/activity";
-import { heartbeatsApi } from "../api/heartbeats";
+import { heartbeatsApi, type ActiveRunForIssue, type LiveRunForIssue } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
@@ -27,7 +27,6 @@ import {
   readIssueDetailHeaderSeed,
   rememberIssueDetailLocationState,
 } from "../lib/issueDetailBreadcrumb";
-import { resolveIssueActiveRun, shouldTrackIssueActiveRun } from "../lib/issueActiveRun";
 import { fetchIssueDetail, getCachedIssueDetail } from "../lib/issueDetailCache";
 import {
   hasBlockingShortcutDialog,
@@ -119,6 +118,29 @@ type IssueDetailComment = (IssueComment | OptimisticIssueComment) & {
 
 const FEEDBACK_TERMS_URL = import.meta.env.VITE_FEEDBACK_TERMS_URL?.trim() || "https://paperclip.ing/tos";
 const ISSUE_COMMENT_PAGE_SIZE = 50;
+
+function resolveRunningIssueRun(
+  activeRun: ActiveRunForIssue | null | undefined,
+  liveRuns: readonly LiveRunForIssue[] | undefined,
+) {
+  return activeRun?.status === "running"
+    ? activeRun
+    : (liveRuns ?? []).find((run) => run.status === "running") ?? null;
+}
+
+function readIssueRunStateFromCache(queryClient: QueryClient, issueId: string) {
+  const liveRuns = queryClient.getQueryData<LiveRunForIssue[]>(
+    queryKeys.issues.liveRuns(issueId),
+  );
+  const activeRun = queryClient.getQueryData<ActiveRunForIssue | null>(
+    queryKeys.issues.activeRun(issueId),
+  );
+  return {
+    liveRuns,
+    activeRun,
+    runningIssueRun: resolveRunningIssueRun(activeRun, liveRuns),
+  };
+}
 
 function keepPreviousData<T>(previousData: T | undefined) {
   return previousData;
@@ -466,6 +488,364 @@ function InboxMobileToolbar({
   );
 }
 
+type IssueDetailChatTabProps = {
+  issueId: string;
+  issue: Issue;
+  comments: IssueDetailComment[];
+  hasOlderComments: boolean;
+  commentsLoadingOlder: boolean;
+  onLoadOlderComments: () => void;
+  composerRef: Ref<IssueChatComposerHandle>;
+  feedbackVotes?: FeedbackVote[];
+  feedbackDataSharingPreference: "allowed" | "not_allowed" | "prompt";
+  feedbackTermsUrl: string | null;
+  agentMap: Map<string, Agent>;
+  currentUserId: string | null;
+  draftKey: string;
+  reassignOptions: Array<{ id: string; label: string; searchText?: string }>;
+  currentAssigneeValue: string;
+  suggestedAssigneeValue: string;
+  mentions: MentionOption[];
+  composerDisabledReason: string | null;
+  onVote: (
+    commentId: string,
+    vote: "up" | "down",
+    options?: { allowSharing?: boolean; reason?: string },
+  ) => Promise<void>;
+  onAdd: (body: string, reopen?: boolean, reassignment?: CommentReassignment) => Promise<void>;
+  onImageUpload: (file: File) => Promise<string>;
+  onAttachImage: (file: File) => Promise<void>;
+  onInterruptQueued: (runId: string) => Promise<void>;
+  onCancelQueued: (commentId: string) => void;
+  interruptingQueuedRunId: string | null;
+  onImageClick: (src: string) => void;
+};
+
+function IssueDetailChatTab({
+  issueId,
+  issue,
+  comments,
+  hasOlderComments,
+  commentsLoadingOlder,
+  onLoadOlderComments,
+  composerRef,
+  feedbackVotes,
+  feedbackDataSharingPreference,
+  feedbackTermsUrl,
+  agentMap,
+  currentUserId,
+  draftKey,
+  reassignOptions,
+  currentAssigneeValue,
+  suggestedAssigneeValue,
+  mentions,
+  composerDisabledReason,
+  onVote,
+  onAdd,
+  onImageUpload,
+  onAttachImage,
+  onInterruptQueued,
+  onCancelQueued,
+  interruptingQueuedRunId,
+  onImageClick,
+}: IssueDetailChatTabProps) {
+  const { data: activity, isLoading: activityLoading } = useQuery({
+    queryKey: queryKeys.issues.activity(issueId),
+    queryFn: () => activityApi.forIssue(issueId),
+    placeholderData: keepPreviousData,
+  });
+  const { data: liveRuns, isLoading: liveRunsLoading } = useQuery({
+    queryKey: queryKeys.issues.liveRuns(issueId),
+    queryFn: () => heartbeatsApi.liveRunsForIssue(issueId),
+    refetchInterval: 3000,
+    placeholderData: keepPreviousData,
+  });
+  const liveRunCount = liveRuns?.length ?? 0;
+  const { data: activeRun, isLoading: activeRunLoading } = useQuery({
+    queryKey: queryKeys.issues.activeRun(issueId),
+    queryFn: () => heartbeatsApi.activeRunForIssue(issueId),
+    enabled: !!issue.executionRunId || issue.status === "in_progress",
+    refetchInterval: liveRunCount > 0 ? false : 3000,
+    placeholderData: keepPreviousData,
+  });
+  const hasLiveRuns = liveRunCount > 0 || !!activeRun;
+  const { data: linkedRuns, isLoading: linkedRunsLoading } = useQuery({
+    queryKey: queryKeys.issues.runs(issueId),
+    queryFn: () => activityApi.runsForIssue(issueId),
+    refetchInterval: hasLiveRuns ? 5000 : false,
+    placeholderData: keepPreviousData,
+  });
+
+  const runningIssueRun = useMemo(
+    () => resolveRunningIssueRun(activeRun, liveRuns),
+    [activeRun, liveRuns],
+  );
+  const timelineRuns = useMemo(() => {
+    const liveIds = new Set<string>();
+    for (const run of liveRuns ?? []) liveIds.add(run.id);
+    if (activeRun) liveIds.add(activeRun.id);
+    const historicalRuns = liveIds.size === 0
+      ? (linkedRuns ?? [])
+      : (linkedRuns ?? []).filter((run) => !liveIds.has(run.runId));
+    return historicalRuns.map((run) => ({
+      ...run,
+      adapterType: run.adapterType,
+      hasStoredOutput: (run.logBytes ?? 0) > 0,
+    }));
+  }, [activeRun, linkedRuns, liveRuns]);
+  const commentsWithRunMeta = useMemo<IssueDetailComment[]>(() => {
+    const activeRunStartedAt = runningIssueRun?.startedAt ?? runningIssueRun?.createdAt ?? null;
+    const runMetaByCommentId = new Map<string, { runId: string; runAgentId: string | null; interruptedRunId: string | null }>();
+    const agentIdByRunId = new Map<string, string>();
+
+    for (const run of linkedRuns ?? []) {
+      agentIdByRunId.set(run.runId, run.agentId);
+    }
+    for (const evt of activity ?? []) {
+      if (evt.action !== "issue.comment_added" || !evt.runId) continue;
+      const details = evt.details ?? {};
+      const commentId = typeof details["commentId"] === "string" ? details["commentId"] : null;
+      if (!commentId || runMetaByCommentId.has(commentId)) continue;
+      const interruptedRunId =
+        typeof details["interruptedRunId"] === "string" ? details["interruptedRunId"] : null;
+      runMetaByCommentId.set(commentId, {
+        runId: evt.runId,
+        runAgentId: evt.agentId ?? agentIdByRunId.get(evt.runId) ?? null,
+        interruptedRunId,
+      });
+    }
+
+    return comments.map((comment) => {
+      const meta = runMetaByCommentId.get(comment.id);
+      const nextComment: IssueDetailComment = meta ? { ...comment, ...meta } : { ...comment };
+      if (
+        isQueuedIssueComment({
+          comment: nextComment,
+          activeRunStartedAt,
+          activeRunAgentId: runningIssueRun?.agentId ?? null,
+          runId: meta?.runId ?? nextComment.runId ?? null,
+          interruptedRunId: meta?.interruptedRunId ?? nextComment.interruptedRunId ?? null,
+        })
+      ) {
+        return {
+          ...nextComment,
+          queueState: "queued" as const,
+          queueTargetRunId: runningIssueRun?.id ?? nextComment.queueTargetRunId ?? null,
+        };
+      }
+      return nextComment;
+    });
+  }, [activity, comments, linkedRuns, runningIssueRun]);
+  const timelineEvents = useMemo(
+    () => extractIssueTimelineEvents(activity),
+    [activity],
+  );
+  const initialLoading =
+    (activityLoading && activity === undefined)
+    || (linkedRunsLoading && linkedRuns === undefined)
+    || (liveRunsLoading && liveRuns === undefined)
+    || (activeRunLoading && activeRun === undefined);
+
+  if (initialLoading) {
+    return <IssueChatSkeleton />;
+  }
+
+  return (
+    <div className="space-y-3">
+      {hasOlderComments ? (
+        <div className="flex justify-center">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={commentsLoadingOlder}
+            onClick={onLoadOlderComments}
+          >
+            {commentsLoadingOlder ? "Loading earlier comments..." : "Load earlier comments"}
+          </Button>
+        </div>
+      ) : null}
+      <IssueChatThread
+        composerRef={composerRef}
+        comments={commentsWithRunMeta}
+        feedbackVotes={feedbackVotes}
+        feedbackDataSharingPreference={feedbackDataSharingPreference}
+        feedbackTermsUrl={feedbackTermsUrl}
+        linkedRuns={timelineRuns}
+        timelineEvents={timelineEvents}
+        liveRuns={liveRuns}
+        activeRun={activeRun}
+        companyId={issue.companyId}
+        projectId={issue.projectId}
+        issueStatus={issue.status}
+        agentMap={agentMap}
+        currentUserId={currentUserId}
+        draftKey={draftKey}
+        enableReassign
+        reassignOptions={reassignOptions}
+        currentAssigneeValue={currentAssigneeValue}
+        suggestedAssigneeValue={suggestedAssigneeValue}
+        mentions={mentions}
+        composerDisabledReason={composerDisabledReason}
+        onVote={onVote}
+        onAdd={onAdd}
+        imageUploadHandler={onImageUpload}
+        onAttachImage={onAttachImage}
+        onInterruptQueued={onInterruptQueued}
+        onCancelQueued={onCancelQueued}
+        interruptingQueuedRunId={interruptingQueuedRunId}
+        stoppingRunId={interruptingQueuedRunId}
+        onStopRun={onInterruptQueued}
+        onCancelRun={runningIssueRun
+          ? async () => {
+              await onInterruptQueued(runningIssueRun.id);
+            }
+          : undefined}
+        onImageClick={onImageClick}
+      />
+    </div>
+  );
+}
+
+type IssueDetailActivityTabProps = {
+  issueId: string;
+  agentMap: Map<string, Agent>;
+  currentUserId: string | null;
+  pendingApprovalAction: { approvalId: string; action: "approve" | "reject" } | null;
+  onApprovalAction: (approvalId: string, action: "approve" | "reject") => void;
+};
+
+function IssueDetailActivityTab({
+  issueId,
+  agentMap,
+  currentUserId,
+  pendingApprovalAction,
+  onApprovalAction,
+}: IssueDetailActivityTabProps) {
+  const { data: activity, isLoading: activityLoading } = useQuery({
+    queryKey: queryKeys.issues.activity(issueId),
+    queryFn: () => activityApi.forIssue(issueId),
+    placeholderData: keepPreviousData,
+  });
+  const { data: linkedRuns, isLoading: linkedRunsLoading } = useQuery({
+    queryKey: queryKeys.issues.runs(issueId),
+    queryFn: () => activityApi.runsForIssue(issueId),
+    placeholderData: keepPreviousData,
+  });
+  const { data: linkedApprovals } = useQuery({
+    queryKey: queryKeys.issues.approvals(issueId),
+    queryFn: () => issuesApi.listApprovals(issueId),
+    placeholderData: keepPreviousData,
+  });
+  const initialLoading =
+    (activityLoading && activity === undefined)
+    || (linkedRunsLoading && linkedRuns === undefined);
+  const issueCostSummary = useMemo(() => {
+    let input = 0;
+    let output = 0;
+    let cached = 0;
+    let cost = 0;
+    let hasCost = false;
+    let hasTokens = false;
+
+    for (const run of linkedRuns ?? []) {
+      const usage = asRecord(run.usageJson);
+      const result = asRecord(run.resultJson);
+      const runInput = usageNumber(usage, "inputTokens", "input_tokens");
+      const runOutput = usageNumber(usage, "outputTokens", "output_tokens");
+      const runCached = usageNumber(
+        usage,
+        "cachedInputTokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+      );
+      const runCost = visibleRunCostUsd(usage, result);
+      if (runCost > 0) hasCost = true;
+      if (runInput + runOutput + runCached > 0) hasTokens = true;
+      input += runInput;
+      output += runOutput;
+      cached += runCached;
+      cost += runCost;
+    }
+
+    return {
+      input,
+      output,
+      cached,
+      cost,
+      totalTokens: input + output,
+      hasCost,
+      hasTokens,
+    };
+  }, [linkedRuns]);
+
+  if (initialLoading) {
+    return <IssueSectionSkeleton titleWidth="w-20" rows={4} />;
+  }
+
+  return (
+    <>
+      {linkedApprovals && linkedApprovals.length > 0 && (
+        <div className="mb-3 space-y-3">
+          {linkedApprovals.map((approval) => (
+            <ApprovalCard
+              key={approval.id}
+              approval={approval}
+              requesterAgent={approval.requestedByAgentId ? agentMap.get(approval.requestedByAgentId) ?? null : null}
+              onApprove={() => onApprovalAction(approval.id, "approve")}
+              onReject={() => onApprovalAction(approval.id, "reject")}
+              detailLink={`/approvals/${approval.id}`}
+              isPending={pendingApprovalAction?.approvalId === approval.id}
+              pendingAction={
+                pendingApprovalAction?.approvalId === approval.id
+                  ? pendingApprovalAction.action
+                  : null
+              }
+            />
+          ))}
+        </div>
+      )}
+      {linkedRuns && linkedRuns.length > 0 && (
+        <div className="mb-3 px-3 py-2 rounded-lg border border-border">
+          <div className="text-sm font-medium text-muted-foreground mb-1">Cost Summary</div>
+          {!issueCostSummary.hasCost && !issueCostSummary.hasTokens ? (
+            <div className="text-xs text-muted-foreground">No cost data yet.</div>
+          ) : (
+            <div className="flex flex-wrap gap-3 text-xs text-muted-foreground tabular-nums">
+              {issueCostSummary.hasCost && (
+                <span className="font-medium text-foreground">
+                  ${issueCostSummary.cost.toFixed(4)}
+                </span>
+              )}
+              {issueCostSummary.hasTokens && (
+                <span>
+                  Tokens {formatTokens(issueCostSummary.totalTokens)}
+                  {issueCostSummary.cached > 0
+                    ? ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)}, cached ${formatTokens(issueCostSummary.cached)})`
+                    : ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)})`}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {!activity || activity.length === 0 ? (
+        <p className="text-xs text-muted-foreground">No activity yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {activity.slice(0, 20).map((evt) => (
+            <div key={evt.id} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <ActorIdentity evt={evt} agentMap={agentMap} />
+              <span>{formatIssueActivityAction(evt.action, evt.details, { agentMap, currentUserId })}</span>
+              <span className="ml-auto shrink-0">{relativeTime(evt.createdAt)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function IssueDetail() {
   const { issueId } = useParams<{ issueId: string }>();
   const { selectedCompanyId } = useCompany();
@@ -555,20 +935,6 @@ export function IssueDetail() {
     [commentPages?.pages],
   );
 
-  const { data: activity, isLoading: activityLoading } = useQuery({
-    queryKey: queryKeys.issues.activity(issueId!),
-    queryFn: () => activityApi.forIssue(issueId!),
-    enabled: !!issueId,
-    placeholderData: keepPreviousData,
-  });
-
-  const { data: linkedApprovals } = useQuery({
-    queryKey: queryKeys.issues.approvals(issueId!),
-    queryFn: () => issuesApi.listApprovals(issueId!),
-    enabled: !!issueId,
-    placeholderData: keepPreviousData,
-  });
-
   const { data: attachments, isLoading: attachmentsLoading } = useQuery({
     queryKey: queryKeys.issues.attachments(issueId!),
     queryFn: () => issuesApi.listAttachments(issueId!),
@@ -576,59 +942,28 @@ export function IssueDetail() {
     placeholderData: keepPreviousData,
   });
 
-  const { data: liveRuns, isLoading: liveRunsLoading } = useQuery({
+  const { data: liveRunCount = 0 } = useQuery({
     queryKey: queryKeys.issues.liveRuns(issueId!),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueId!),
     enabled: !!issueId,
     refetchInterval: 3000,
+    select: (runs) => runs.length,
     placeholderData: keepPreviousData,
   });
 
-  const shouldPollActiveRun = shouldTrackIssueActiveRun(issue);
-  const { data: rawActiveRun, isLoading: activeRunLoading } = useQuery({
+  const { data: hasActiveRun = false } = useQuery({
     queryKey: queryKeys.issues.activeRun(issueId!),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
-    enabled: !!issueId && shouldPollActiveRun,
-    refetchInterval: (liveRuns?.length ?? 0) > 0 ? false : 3000,
+    enabled: !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
+    refetchInterval: liveRunCount > 0 ? false : 3000,
+    select: (run) => !!run,
     placeholderData: keepPreviousData,
   });
-  const activeRun = resolveIssueActiveRun(issue, rawActiveRun);
-
-  const hasLiveRuns = (liveRuns ?? []).length > 0 || !!activeRun;
-  const { data: linkedRuns, isLoading: linkedRunsLoading } = useQuery({
-    queryKey: queryKeys.issues.runs(issueId!),
-    queryFn: () => activityApi.runsForIssue(issueId!),
-    enabled: !!issueId,
-    refetchInterval: hasLiveRuns ? 5000 : false,
-    placeholderData: keepPreviousData,
-  });
-  const runningIssueRun = useMemo(
-    () => (
-      activeRun?.status === "running"
-        ? activeRun
-        : (liveRuns ?? []).find((run) => run.status === "running") ?? null
-    ),
-    [activeRun, liveRuns],
-  );
+  const hasLiveRuns = liveRunCount > 0 || hasActiveRun;
   const sourceBreadcrumb = useMemo(
     () => readIssueDetailBreadcrumb(issueId, location.state, location.search) ?? { label: "Issues", href: "/issues" },
     [issueId, location.state, location.search],
   );
-
-  // Filter out runs already shown by the live widget to avoid duplication
-  const timelineRuns = useMemo(() => {
-    const liveIds = new Set<string>();
-    for (const r of liveRuns ?? []) liveIds.add(r.id);
-    if (activeRun) liveIds.add(activeRun.id);
-    const historicalRuns = liveIds.size === 0
-      ? (linkedRuns ?? [])
-      : (linkedRuns ?? []).filter((r) => !liveIds.has(r.runId));
-    return historicalRuns.map((run) => ({
-      ...run,
-      adapterType: run.adapterType,
-      hasStoredOutput: (run.logBytes ?? 0) > 0,
-    }));
-  }, [linkedRuns, liveRuns, activeRun]);
 
   const { data: rawChildIssues = [], isLoading: childIssuesLoading } = useQuery({
     queryKey:
@@ -777,92 +1112,6 @@ export function IssueDetail() {
     () => mergeIssueComments(comments ?? [], optimisticComments),
     [comments, optimisticComments],
   );
-
-  const commentsWithRunMeta = useMemo<IssueDetailComment[]>(() => {
-    const activeRunStartedAt = runningIssueRun?.startedAt ?? runningIssueRun?.createdAt ?? null;
-    const runMetaByCommentId = new Map<string, { runId: string; runAgentId: string | null; interruptedRunId: string | null }>();
-    const agentIdByRunId = new Map<string, string>();
-    for (const run of linkedRuns ?? []) {
-      agentIdByRunId.set(run.runId, run.agentId);
-    }
-    for (const evt of activity ?? []) {
-      if (evt.action !== "issue.comment_added" || !evt.runId) continue;
-      const details = evt.details ?? {};
-      const commentId = typeof details["commentId"] === "string" ? details["commentId"] : null;
-      if (!commentId || runMetaByCommentId.has(commentId)) continue;
-      const interruptedRunId =
-        typeof details["interruptedRunId"] === "string" ? details["interruptedRunId"] : null;
-      runMetaByCommentId.set(commentId, {
-        runId: evt.runId,
-        runAgentId: evt.agentId ?? agentIdByRunId.get(evt.runId) ?? null,
-        interruptedRunId,
-      });
-    }
-    return threadComments.map((comment) => {
-      const meta = runMetaByCommentId.get(comment.id);
-      const nextComment: IssueDetailComment = meta ? { ...comment, ...meta } : { ...comment };
-      if (
-        isQueuedIssueComment({
-          comment: nextComment,
-          activeRunStartedAt,
-          activeRunAgentId: runningIssueRun?.agentId ?? null,
-          runId: meta?.runId ?? nextComment.runId ?? null,
-          interruptedRunId: meta?.interruptedRunId ?? nextComment.interruptedRunId ?? null,
-        })
-      ) {
-        return {
-          ...nextComment,
-          queueState: "queued" as const,
-          queueTargetRunId: runningIssueRun?.id ?? nextComment.queueTargetRunId ?? null,
-        };
-      }
-      return nextComment;
-    });
-  }, [activity, threadComments, linkedRuns, runningIssueRun]);
-
-  const timelineEvents = useMemo(
-    () => extractIssueTimelineEvents(activity),
-    [activity],
-  );
-
-  const issueCostSummary = useMemo(() => {
-    let input = 0;
-    let output = 0;
-    let cached = 0;
-    let cost = 0;
-    let hasCost = false;
-    let hasTokens = false;
-
-    for (const run of linkedRuns ?? []) {
-      const usage = asRecord(run.usageJson);
-      const result = asRecord(run.resultJson);
-      const runInput = usageNumber(usage, "inputTokens", "input_tokens");
-      const runOutput = usageNumber(usage, "outputTokens", "output_tokens");
-      const runCached = usageNumber(
-        usage,
-        "cachedInputTokens",
-        "cached_input_tokens",
-        "cache_read_input_tokens",
-      );
-      const runCost = visibleRunCostUsd(usage, result);
-      if (runCost > 0) hasCost = true;
-      if (runInput + runOutput + runCached > 0) hasTokens = true;
-      input += runInput;
-      output += runOutput;
-      cached += runCached;
-      cost += runCost;
-    }
-
-    return {
-      input,
-      output,
-      cached,
-      cost,
-      totalTokens: input + output,
-      hasCost,
-      hasTokens,
-    };
-  }, [linkedRuns]);
 
   const invalidateIssueDetail = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId!) });
@@ -1062,7 +1311,7 @@ export function IssueDetail() {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
 
       const previousIssue = queryClient.getQueryData<Issue>(queryKeys.issues.detail(issueId!));
-      const queuedComment = !interrupt && runningIssueRun;
+      const queuedComment = !interrupt ? readIssueRunStateFromCache(queryClient, issueId!).runningIssueRun : null;
       const optimisticComment = issue
         ? createOptimisticIssueComment({
             companyId: issue.companyId,
@@ -1070,7 +1319,7 @@ export function IssueDetail() {
             body,
             authorUserId: currentUserId,
             clientStatus: queuedComment ? "queued" : "pending",
-            queueTargetRunId: queuedComment ? runningIssueRun.id : null,
+            queueTargetRunId: queuedComment?.id ?? null,
           })
         : null;
 
@@ -1172,7 +1421,7 @@ export function IssueDetail() {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.detail(issueId!) });
 
       const previousIssue = queryClient.getQueryData<Issue>(queryKeys.issues.detail(issueId!));
-      const queuedComment = !interrupt && runningIssueRun;
+      const queuedComment = !interrupt ? readIssueRunStateFromCache(queryClient, issueId!).runningIssueRun : null;
       const optimisticComment = issue
         ? createOptimisticIssueComment({
             companyId: issue.companyId,
@@ -1180,7 +1429,7 @@ export function IssueDetail() {
             body,
             authorUserId: currentUserId,
             clientStatus: queuedComment ? "queued" : "pending",
-            queueTargetRunId: queuedComment ? runningIssueRun.id : null,
+            queueTargetRunId: queuedComment?.id ?? null,
           })
         : null;
 
@@ -1269,10 +1518,11 @@ export function IssueDetail() {
       await queryClient.cancelQueries({ queryKey: queryKeys.issues.activeRun(issueId!) });
 
       const previousRuns = queryClient.getQueryData<RunForIssue[]>(queryKeys.issues.runs(issueId!));
-      const previousLiveRuns = queryClient.getQueryData<typeof liveRuns>(queryKeys.issues.liveRuns(issueId!));
-      const previousActiveRun = queryClient.getQueryData<typeof activeRun>(queryKeys.issues.activeRun(issueId!));
-      const liveRunList = previousLiveRuns ?? liveRuns ?? [];
-      const cachedActiveRun = previousActiveRun ?? activeRun;
+      const previousLiveRuns = queryClient.getQueryData<LiveRunForIssue[]>(queryKeys.issues.liveRuns(issueId!));
+      const previousActiveRun = queryClient.getQueryData<ActiveRunForIssue | null>(queryKeys.issues.activeRun(issueId!));
+      const liveRunList = previousLiveRuns ?? [];
+      const cachedActiveRun = previousActiveRun ?? null;
+      const runningIssueRun = resolveRunningIssueRun(cachedActiveRun, liveRunList);
       const targetRun =
         cachedActiveRun?.id === runId
           ? cachedActiveRun
@@ -1288,11 +1538,11 @@ export function IssueDetail() {
 
       queryClient.setQueryData(
         queryKeys.issues.liveRuns(issueId!),
-        (current: typeof liveRuns) => removeLiveRunById(current, runId),
+        (current: LiveRunForIssue[] | undefined) => removeLiveRunById(current, runId),
       );
       queryClient.setQueryData(
         queryKeys.issues.activeRun(issueId!),
-        (current: typeof activeRun) => (current?.id === runId ? null : current),
+        (current: ActiveRunForIssue | null | undefined) => (current?.id === runId ? null : current),
       );
 
       return {
@@ -1790,16 +2040,6 @@ export function IssueDetail() {
     return () => setMobileToolbar(null);
   }, [showInboxToolbar, backHref, issue?.id, issueHidden, archivePending, setMobileToolbar]);
 
-  const issueChatCoreInitialLoading =
-    (commentsLoading && commentPages === undefined)
-    || (activityLoading && activity === undefined)
-    || (linkedRunsLoading && linkedRuns === undefined)
-    || (liveRunsLoading && liveRuns === undefined)
-    || (activeRunLoading && activeRun === undefined);
-  const issueChatInitialLoading = issueChatCoreInitialLoading;
-  const activityInitialLoading =
-    (activityLoading && activity === undefined)
-    || (linkedRunsLoading && linkedRuns === undefined);
   const attachmentsInitialLoading = attachmentsLoading && attachments === undefined;
 
   if (isLoading) return <IssueDetailLoadingState headerSeed={issueHeaderSeed} />;
@@ -2323,155 +2563,74 @@ export function IssueDetail() {
         </TabsList>
 
         <TabsContent value="chat">
-          {issueChatInitialLoading ? (
-            <IssueChatSkeleton />
-          ) : (
-            <div className="space-y-3">
-              {hasOlderComments ? (
-                <div className="flex justify-center">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    disabled={commentsLoadingOlder}
-                    onClick={() => {
-                      void fetchOlderComments();
-                    }}
-                  >
-                    {commentsLoadingOlder ? "Loading earlier comments..." : "Load earlier comments"}
-                  </Button>
-                </div>
-              ) : null}
-              <IssueChatThread
-                composerRef={commentComposerRef}
-                comments={commentsWithRunMeta}
-                feedbackVotes={feedbackVotes}
-                feedbackDataSharingPreference={feedbackDataSharingPreference}
-                feedbackTermsUrl={FEEDBACK_TERMS_URL}
-                linkedRuns={timelineRuns}
-                timelineEvents={timelineEvents}
-                liveRuns={liveRuns}
-                activeRun={activeRun}
-                companyId={issue.companyId}
-                projectId={issue.projectId}
-                issueStatus={issue.status}
-                agentMap={agentMap}
-                currentUserId={currentUserId}
-                draftKey={`paperclip:issue-comment-draft:${issue.id}`}
-                enableReassign
-                reassignOptions={commentReassignOptions}
-                currentAssigneeValue={actualAssigneeValue}
-                suggestedAssigneeValue={suggestedAssigneeValue}
-                mentions={mentionOptions}
-                composerDisabledReason={commentComposerDisabledReason}
-                onVote={async (commentId, vote, options) => {
-                  await feedbackVoteMutation.mutateAsync({
-                    targetType: "issue_comment",
-                    targetId: commentId,
-                    vote,
-                    reason: options?.reason,
-                    allowSharing: options?.allowSharing,
-                    sharingPreferenceAtSubmit: feedbackDataSharingPreference,
-                  });
-                }}
-                onAdd={async (body, reopen, reassignment) => {
-                  if (reassignment) {
-                    await addCommentAndReassign.mutateAsync({ body, reopen, reassignment });
-                    return;
-                  }
-                  await addComment.mutateAsync({ body, reopen });
-                }}
-                imageUploadHandler={async (file) => {
-                  const attachment = await uploadAttachment.mutateAsync(file);
-                  return attachment.contentPath;
-                }}
-                onAttachImage={async (file) => {
-                  await uploadAttachment.mutateAsync(file);
-                }}
-                onInterruptQueued={async (runId) => {
-                  await interruptQueuedComment.mutateAsync(runId);
-                }}
-                onCancelQueued={handleCancelQueuedComment}
-                interruptingQueuedRunId={interruptQueuedComment.isPending ? interruptQueuedComment.variables ?? null : null}
-                stoppingRunId={interruptQueuedComment.isPending ? interruptQueuedComment.variables ?? null : null}
-                onStopRun={async (runId) => {
-                  await interruptQueuedComment.mutateAsync(runId);
-                }}
-                onCancelRun={runningIssueRun
-                  ? async () => {
-                      await interruptQueuedComment.mutateAsync(runningIssueRun.id);
-                    }
-                  : undefined}
-                onImageClick={handleChatImageClick}
-              />
-            </div>
-          )}
+          {detailTab === "chat" ? (
+            <IssueDetailChatTab
+              issueId={issue.id}
+              issue={issue}
+              comments={threadComments}
+              hasOlderComments={hasOlderComments}
+              commentsLoadingOlder={commentsLoadingOlder}
+              onLoadOlderComments={() => {
+                void fetchOlderComments();
+              }}
+              composerRef={commentComposerRef}
+              feedbackVotes={feedbackVotes}
+              feedbackDataSharingPreference={feedbackDataSharingPreference}
+              feedbackTermsUrl={FEEDBACK_TERMS_URL}
+              agentMap={agentMap}
+              currentUserId={currentUserId}
+              draftKey={`paperclip:issue-comment-draft:${issue.id}`}
+              reassignOptions={commentReassignOptions}
+              currentAssigneeValue={actualAssigneeValue}
+              suggestedAssigneeValue={suggestedAssigneeValue}
+              mentions={mentionOptions}
+              composerDisabledReason={commentComposerDisabledReason}
+              onVote={async (commentId, vote, options) => {
+                await feedbackVoteMutation.mutateAsync({
+                  targetType: "issue_comment",
+                  targetId: commentId,
+                  vote,
+                  reason: options?.reason,
+                  allowSharing: options?.allowSharing,
+                  sharingPreferenceAtSubmit: feedbackDataSharingPreference,
+                });
+              }}
+              onAdd={async (body, reopen, reassignment) => {
+                if (reassignment) {
+                  await addCommentAndReassign.mutateAsync({ body, reopen, reassignment });
+                  return;
+                }
+                await addComment.mutateAsync({ body, reopen });
+              }}
+              onImageUpload={async (file) => {
+                const attachment = await uploadAttachment.mutateAsync(file);
+                return attachment.contentPath;
+              }}
+              onAttachImage={async (file) => {
+                await uploadAttachment.mutateAsync(file);
+              }}
+              onInterruptQueued={async (runId) => {
+                await interruptQueuedComment.mutateAsync(runId);
+              }}
+              onCancelQueued={handleCancelQueuedComment}
+              interruptingQueuedRunId={interruptQueuedComment.isPending ? interruptQueuedComment.variables ?? null : null}
+              onImageClick={handleChatImageClick}
+            />
+          ) : null}
         </TabsContent>
 
         <TabsContent value="activity">
-          {activityInitialLoading ? (
-            <IssueSectionSkeleton titleWidth="w-20" rows={4} />
-          ) : (
-            <>
-              {linkedApprovals && linkedApprovals.length > 0 && (
-                <div className="mb-3 space-y-3">
-                  {linkedApprovals.map((approval) => (
-                    <ApprovalCard
-                      key={approval.id}
-                      approval={approval}
-                      requesterAgent={approval.requestedByAgentId ? agentMap.get(approval.requestedByAgentId) ?? null : null}
-                      onApprove={() => approvalDecision.mutate({ approvalId: approval.id, action: "approve" })}
-                      onReject={() => approvalDecision.mutate({ approvalId: approval.id, action: "reject" })}
-                      detailLink={`/approvals/${approval.id}`}
-                      isPending={pendingApprovalAction?.approvalId === approval.id}
-                      pendingAction={
-                        pendingApprovalAction?.approvalId === approval.id
-                          ? pendingApprovalAction.action
-                          : null
-                      }
-                    />
-                  ))}
-                </div>
-              )}
-              {linkedRuns && linkedRuns.length > 0 && (
-                <div className="mb-3 px-3 py-2 rounded-lg border border-border">
-                  <div className="text-sm font-medium text-muted-foreground mb-1">Cost Summary</div>
-                  {!issueCostSummary.hasCost && !issueCostSummary.hasTokens ? (
-                    <div className="text-xs text-muted-foreground">No cost data yet.</div>
-                  ) : (
-                    <div className="flex flex-wrap gap-3 text-xs text-muted-foreground tabular-nums">
-                      {issueCostSummary.hasCost && (
-                        <span className="font-medium text-foreground">
-                          ${issueCostSummary.cost.toFixed(4)}
-                        </span>
-                      )}
-                      {issueCostSummary.hasTokens && (
-                        <span>
-                          Tokens {formatTokens(issueCostSummary.totalTokens)}
-                          {issueCostSummary.cached > 0
-                            ? ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)}, cached ${formatTokens(issueCostSummary.cached)})`
-                            : ` (in ${formatTokens(issueCostSummary.input)}, out ${formatTokens(issueCostSummary.output)})`}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-              {!activity || activity.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No activity yet.</p>
-              ) : (
-                <div className="space-y-1.5">
-                  {activity.slice(0, 20).map((evt) => (
-                    <div key={evt.id} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <ActorIdentity evt={evt} agentMap={agentMap} />
-                      <span>{formatIssueActivityAction(evt.action, evt.details, { agentMap, currentUserId })}</span>
-                      <span className="ml-auto shrink-0">{relativeTime(evt.createdAt)}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
+          {detailTab === "activity" ? (
+            <IssueDetailActivityTab
+              issueId={issue.id}
+              agentMap={agentMap}
+              currentUserId={currentUserId}
+              pendingApprovalAction={pendingApprovalAction}
+              onApprovalAction={(approvalId, action) => {
+                approvalDecision.mutate({ approvalId, action });
+              }}
+            />
+          ) : null}
         </TabsContent>
 
         {activePluginTab && (
