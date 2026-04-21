@@ -162,6 +162,16 @@ export interface IssueExecutionStage {
   participants: IssueExecutionStageParticipant[];
 }
 
+export interface IssueQuarantineHoldState {
+  adapterType: string;
+  circuitKey: string;
+  routeKey: string;
+  state: "open" | "halfOpen";
+  trippedAt: string;
+  resumeAt: string | null;
+  reason: string | null;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
@@ -178,6 +188,7 @@ export interface IssueExecutionState {
   completedStageIds: string[];
   lastDecisionId: string | null;
   lastDecisionOutcome: IssueExecutionDecisionOutcome | null;
+  quarantineHold?: IssueQuarantineHoldState | null;
 }
 
 export interface IssueExecutionDecision {
@@ -224,6 +235,8 @@ export interface Issue {
   requestDepth: number;
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
+  quarantineHold?: boolean;
+  quarantineResumeAt?: string | null;
   executionPolicy?: IssueExecutionPolicy | null;
   executionState?: IssueExecutionState | null;
   executionWorkspaceId: string | null;

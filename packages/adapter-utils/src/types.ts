@@ -67,6 +67,7 @@ export interface AdapterExecutionResult {
   timedOut: boolean;
   errorMessage?: string | null;
   errorCode?: string | null;
+  adapterFailureReason?: string | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
   /**

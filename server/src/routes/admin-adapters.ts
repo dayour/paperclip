@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { agents, type Db } from "@paperclipai/db";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import { Router } from "express";
-import { getActorInfo, assertInstanceAdmin } from "./authz.js";
+import { getActorInfo, assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { logActivity } from "../services/activity-log.js";
 import {
@@ -22,6 +22,12 @@ type MatchingCircuitTarget = {
 
 type AuditOutcome = "applied" | "rejected_agent_actor";
 type AdminCircuitAction = "reset" | "override_pause";
+
+type ResetRequestShape = {
+  actor?: unknown;
+  actorKind?: unknown;
+  reason?: unknown;
+};
 
 function decodeRouteKey(encoded: string): string | null {
   try {
@@ -44,10 +50,11 @@ async function findMatchingCircuitTargets(db: Db, routeKey: string): Promise<{
   circuitKey: string | null;
   targets: MatchingCircuitTarget[];
 }> {
-  const circuitKey = decodeRouteKey(routeKey);
-  if (!circuitKey) {
+  const routeTarget = decodeRouteKey(routeKey);
+  if (!routeTarget) {
     return { circuitKey: null, targets: [] };
   }
+  const adapterTypeTarget = routeTarget.startsWith("adapter:") ? routeTarget.slice("adapter:".length) : null;
 
   const rows = await db
     .select({
@@ -58,15 +65,19 @@ async function findMatchingCircuitTargets(db: Db, routeKey: string): Promise<{
     .from(agents);
 
   const targetMap = new Map<string, MatchingCircuitTarget>();
+  let matchedCircuitKey: string | null = adapterTypeTarget ? null : routeTarget;
   for (const row of rows) {
-    if (
-      buildCircuitKey({
-        adapterType: row.adapterType,
-        adapterConfig: row.adapterConfig,
-      }) !== circuitKey
-    ) {
+    const rowCircuitKey = buildCircuitKey({
+      adapterType: row.adapterType,
+      adapterConfig: row.adapterConfig,
+    });
+    const matches = adapterTypeTarget
+      ? row.adapterType === adapterTypeTarget
+      : rowCircuitKey === routeTarget;
+    if (!matches) {
       continue;
     }
+    matchedCircuitKey ??= rowCircuitKey;
 
     targetMap.set(`${row.companyId}:${row.adapterType}`, {
       companyId: row.companyId,
@@ -75,9 +86,81 @@ async function findMatchingCircuitTargets(db: Db, routeKey: string): Promise<{
   }
 
   return {
-    circuitKey,
+    circuitKey: matchedCircuitKey,
     targets: [...targetMap.values()],
   };
+}
+
+function readResetRequest(body: unknown): { reason: string | null; actor: string | null; actorKind: string | null } {
+  const parsed = (body ?? {}) as ResetRequestShape;
+  return {
+    reason: readRequiredString(parsed.reason),
+    actor: readRequiredString(parsed.actor),
+    actorKind: readRequiredString(parsed.actorKind),
+  };
+}
+
+async function handleCircuitReset(
+  db: Db,
+  req: Request,
+  res: Response,
+  key: string,
+  reason: string,
+) {
+  const matched = await findMatchingCircuitTargets(db, key);
+  if (!matched.circuitKey) {
+    res.status(400).json({ error: "Invalid circuit key" });
+    return;
+  }
+  if (matched.targets.length === 0) {
+    res.status(404).json({ error: "Adapter circuit not found" });
+    return;
+  }
+
+  if (req.actor.type === "agent") {
+    const actor = getActorInfo(req);
+    await writeCircuitAuditRows(db, {
+      actor,
+      reqActor: req.actor,
+      targets: matched.targets,
+      action: "reset",
+      activityAction: "circuit_reset",
+      key: matched.circuitKey,
+      reason,
+      oldState: null,
+      newState: null,
+      outcome: "rejected_agent_actor",
+    });
+    res.status(403).json({ error: AGENT_ACTOR_RELEASE_ERROR });
+    return;
+  }
+
+  assertBoardOrgAccess(req);
+  assertInstanceAdmin(req);
+  const actor = getActorInfo(req);
+  const oldState = getCircuitState(matched.circuitKey);
+  const newState = resetCircuit(matched.circuitKey);
+  if (!newState) {
+    res.status(404).json({ error: "Adapter circuit not found" });
+    return;
+  }
+
+  const heartbeat = heartbeatService(db);
+  await heartbeat.reconcileCircuitQuarantine({ circuitKey: matched.circuitKey });
+  await writeCircuitAuditRows(db, {
+    actor,
+    reqActor: req.actor,
+    targets: matched.targets,
+    action: "reset",
+    activityAction: "circuit_reset",
+    key: matched.circuitKey,
+    reason,
+    oldState,
+    newState,
+    outcome: "applied",
+  });
+
+  res.json({ ok: true, circuitKey: matched.circuitKey, state: newState.state });
 }
 
 async function writeCircuitAuditRows(
@@ -165,6 +248,7 @@ export function adminAdapterRoutes(db: Db) {
       return;
     }
 
+    assertBoardOrgAccess(req);
     assertInstanceAdmin(req);
     const actor = getActorInfo(req);
     const oldState = getCircuitState(matched.circuitKey);
@@ -213,69 +297,37 @@ export function adminAdapterRoutes(db: Db) {
   });
 
   router.post("/:key/reset", async (req, res) => {
-    const reason = readRequiredString(req.body?.reason);
+    const { reason, actor, actorKind } = readResetRequest(req.body);
     if (!reason) {
       res.status(400).json({ error: "Request body must include a non-empty \"reason\" string." });
       return;
     }
-    if (!readRequiredString(req.body?.actor)) {
+    if (!actor && !actorKind) {
       res.status(400).json({ error: "Request body must include a non-empty \"actor\" string." });
       return;
     }
 
-    const matched = await findMatchingCircuitTargets(db, req.params.key);
-    if (!matched.circuitKey) {
-      res.status(400).json({ error: "Invalid circuit key" });
-      return;
-    }
-    if (matched.targets.length === 0) {
-      res.status(404).json({ error: "Adapter circuit not found" });
-      return;
-    }
+    await handleCircuitReset(db, req, res, req.params.key, reason);
+  });
 
-    if (req.actor.type === "agent") {
-      const actor = getActorInfo(req);
-      await writeCircuitAuditRows(db, {
-        actor,
-        reqActor: req.actor,
-        targets: matched.targets,
-        action: "reset",
-        activityAction: "circuit_reset",
-        key: matched.circuitKey,
-        reason,
-        oldState: null,
-        newState: null,
-        outcome: "rejected_agent_actor",
-      });
-      res.status(403).json({ error: AGENT_ACTOR_RELEASE_ERROR });
+  return router;
+}
+
+export function adapterQuarantineRoutes(db: Db) {
+  const router = Router();
+
+  router.post("/adapters/quarantine/:key/reset", async (req, res) => {
+    const { reason, actorKind } = readResetRequest(req.body);
+    if (!reason) {
+      res.status(400).json({ error: "Request body must include a non-empty \"reason\" string." });
+      return;
+    }
+    if (actorKind !== "user" && actorKind !== "agent") {
+      res.status(400).json({ error: "Request body must include actorKind: \"user\" | \"agent\"." });
       return;
     }
 
-    assertInstanceAdmin(req);
-    const actor = getActorInfo(req);
-    const oldState = getCircuitState(matched.circuitKey);
-    const newState = resetCircuit(matched.circuitKey);
-    if (!newState) {
-      res.status(404).json({ error: "Adapter circuit not found" });
-      return;
-    }
-
-    const heartbeat = heartbeatService(db);
-    await heartbeat.reconcileCircuitQuarantine({ circuitKey: matched.circuitKey });
-    await writeCircuitAuditRows(db, {
-      actor,
-      reqActor: req.actor,
-      targets: matched.targets,
-      action: "reset",
-      activityAction: "circuit_reset",
-      key: matched.circuitKey,
-      reason,
-      oldState,
-      newState,
-      outcome: "applied",
-    });
-
-    res.json({ ok: true, circuitKey: matched.circuitKey, state: newState.state });
+    await handleCircuitReset(db, req, res, req.params.key, reason);
   });
 
   return router;

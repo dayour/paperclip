@@ -239,6 +239,27 @@ describeAdminRoutes("admin adapter routes", () => {
     });
   });
 
+  it("fails reset before breaker mutation when board actor lacks org access", async () => {
+    const { routeKey, circuitKey } = await seedCircuit();
+    const app = createApp({
+      type: "board",
+      userId: "outsider-1",
+      source: "session",
+      companyIds: [],
+      memberships: [],
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post(`/api/admin/adapters/${routeKey}/reset`)
+      .send({ reason: "fix deployed", actor: "outsider-1" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body).toEqual({ error: "Company membership or instance admin access required" });
+    expect(getCircuitState(circuitKey)?.state).toBe("Open");
+    expect(mocks.reconcileCircuitQuarantine).not.toHaveBeenCalled();
+  });
+
   it("override-pauses a circuit for a board actor and audits the applied action", async () => {
     const { companyId, routeKey, circuitKey } = await seedCircuit();
     const app = createApp(boardActor);
@@ -311,5 +332,27 @@ describeAdminRoutes("admin adapter routes", () => {
       oldState: null,
       newState: null,
     });
+  });
+
+  it("fails override-pause before breaker mutation when board actor lacks org access", async () => {
+    const { routeKey, circuitKey } = await seedCircuit();
+    const app = createApp({
+      type: "board",
+      userId: "outsider-1",
+      source: "session",
+      companyIds: [],
+      memberships: [],
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post(`/api/admin/adapters/${routeKey}/override-pause`)
+      .send({ reason: "route to builtin fallback" });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body).toEqual({ error: "Company membership or instance admin access required" });
+    expect(isOverridePaused("claude_local")).toBe(false);
+    expect(getCircuitState(circuitKey)?.state).toBe("Open");
+    expect(mocks.reconcileCircuitQuarantine).not.toHaveBeenCalled();
   });
 });
