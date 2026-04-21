@@ -53,6 +53,17 @@ export function setCopilotClientFactoryForTests(factory: CopilotClientFactory | 
   copilotClientFactory = factory ?? defaultCopilotClientFactory;
 }
 
+/**
+ * Permission handler that auto-approves every Copilot SDK permission request.
+ *
+ * **Experimental / interim.** Copilot SDK permission requests currently
+ * auto-approve via SDK `approveAll`. Capability-scoped policy gating tracked
+ * in CLI-37 / ADR-0005 will replace this once the bridge token model lands.
+ *
+ * Until then, this adapter is registered with `experimental: true` (see
+ * server/cli/ui registry entries) and the `copilot-local` docs carry the
+ * matching status banner.
+ */
 export const approveAll: NonNullable<SessionConfig["onPermissionRequest"]> = async (...args) => {
   const { approveAll: sdkApproveAll } = await loadCopilotSdk();
   return await sdkApproveAll(...args);

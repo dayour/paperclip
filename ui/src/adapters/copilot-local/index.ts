@@ -8,4 +8,7 @@ export const copilotLocalUIAdapter: UIAdapterModule = {
   parseStdoutLine: parseCopilotStdoutLine,
   ConfigFields: CopilotLocalConfigFields,
   buildAdapterConfig: buildCopilotLocalConfig,
+  // CLI-11 / CTO ruling: experimental until CLI-152 lands the capability-
+  // scoped policy gate replacing sdk-client.ts#approveAll.
+  experimental: true,
 };

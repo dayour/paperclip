@@ -178,6 +178,10 @@ const copilotLocalAdapter: ServerAdapterModule = {
   instructionsPathKey: "instructionsFilePath",
   requiresMaterializedRuntimeSkills: false,
   agentConfigurationDoc: copilotAgentConfigurationDoc,
+  // CLI-11 / CTO ruling 2026-04-21 11:57Z: ships experimental until the
+  // capability-scoped policy gate replaces sdk-client.ts#approveAll. Tracked
+  // in CLI-152 (replace approveAll) and ADR-0005 (bridge token model).
+  experimental: true,
 };
 
 const cursorLocalAdapter: ServerAdapterModule = {

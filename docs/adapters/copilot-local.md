@@ -3,6 +3,8 @@ title: GitHub Copilot Local
 summary: GitHub Copilot SDK local adapter setup and configuration
 ---
 
+> **Status: experimental.** Copilot SDK permission requests currently auto-approve via SDK `approveAll`. Capability-scoped policy gating tracked in CLI-37 / ADR-0005 will replace this once the bridge token model lands.
+
 The `copilot_local` adapter runs GitHub Copilot locally through the official `@github/copilot-sdk`. It is a good fit when you want GitHub-hosted model access, Copilot session resume, and the same local-agent workflow as the other built-in coding adapters without shelling out to `copilot -p` for every run.
 
 ## Prerequisites
