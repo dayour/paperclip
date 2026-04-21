@@ -691,8 +691,11 @@ export function adapterRoutes() {
 
   // ── POST /api/adapters/:type/circuit-breaker/force-quarantine ───────────
   // Manually force an adapter into quarantine (Open) state.
-  // Per ADR-0006 §9: only board (human) actors may trigger; agents are
-  // rejected even if they have valid credentials. Rejection is auditable.
+  // Per ADR-0006 §9 / CLI-176: authz ordering is critical:
+  //   1. Agent actors: rejected with audit row (no state mutation).
+  //   2. Board actors without org access: rejected by assertBoardOrgAccess
+  //      (no audit row, no state mutation).
+  //   3. Authorized board actors: state mutated, success audit row written.
   router.post("/adapters/:type/circuit-breaker/force-quarantine", (req, res) => {
     if (req.actor.type === "none") {
       res.status(401).json({ error: "Authentication required." });
@@ -702,20 +705,16 @@ export function adapterRoutes() {
     const adapterType = req.params.type;
     const { reason } = req.body as { reason?: string };
 
-    const actorType = req.actor.type === "agent" ? "agent" : "board";
-    const actorId =
-      req.actor.type === "agent"
-        ? (req.actor.agentId ?? "unknown-agent")
-        : (req.actor.userId ?? "board");
-
-    const { allowed, auditRow } = forceQuarantine(adapterType, actorType, actorId, reason);
-
-    logger.info(
-      { adapterType, actorType, actorId, allowed, reason },
-      "Circuit-breaker force-quarantine request",
-    );
-
-    if (!allowed) {
+    // Step 1: Agent actors are unconditionally rejected with an auditable row.
+    // forceQuarantine("agent", ...) writes the rejection audit without mutating
+    // circuit state — ensuring the agent rejection is always recorded.
+    if (req.actor.type === "agent") {
+      const actorId = req.actor.agentId ?? "unknown-agent";
+      const { auditRow } = forceQuarantine(adapterType, "agent", actorId, reason);
+      logger.info(
+        { adapterType, actorType: "agent", actorId, allowed: false, reason },
+        "Circuit-breaker force-quarantine rejected: actor_is_agent",
+      );
       res.status(403).json({
         error: "Agent actors are not permitted to manually quarantine adapters (ADR-0006 §9 / CLI-91).",
         auditId: auditRow.id,
@@ -724,14 +723,24 @@ export function adapterRoutes() {
       return;
     }
 
+    // Step 2: Board org-access check BEFORE any state mutation (CLI-176 fix).
+    // assertBoardOrgAccess throws before we reach forceQuarantine, so an
+    // unauthorized board member cannot mutate the circuit state.
     assertBoardOrgAccess(req);
+
+    // Step 3: Authorized board actor — safe to mutate.
+    const actorId = req.actor.userId ?? "board";
+    const { auditRow } = forceQuarantine(adapterType, "board", actorId, reason);
+    logger.info(
+      { adapterType, actorType: "board", actorId, allowed: true, reason },
+      "Circuit-breaker force-quarantine authorized",
+    );
     res.json({ adapterType, quarantined: true, auditId: auditRow.id });
   });
 
   // ── POST /api/adapters/:type/circuit-breaker/reset ──────────────────────
   // Reset the circuit breaker to Closed state (manual operator release).
-  // Per ADR-0006 §9: only board (human) actors may trigger; agents are
-  // rejected even if they have valid credentials. Rejection is auditable.
+  // Same three-step authz ordering as force-quarantine (CLI-176).
   router.post("/adapters/:type/circuit-breaker/reset", (req, res) => {
     if (req.actor.type === "none") {
       res.status(401).json({ error: "Authentication required." });
@@ -741,20 +750,14 @@ export function adapterRoutes() {
     const adapterType = req.params.type;
     const { force } = req.body as { force?: boolean };
 
-    const actorType = req.actor.type === "agent" ? "agent" : "board";
-    const actorId =
-      req.actor.type === "agent"
-        ? (req.actor.agentId ?? "unknown-agent")
-        : (req.actor.userId ?? "board");
-
-    const { allowed, auditRow } = resetBreaker(adapterType, actorType, actorId, force === true);
-
-    logger.info(
-      { adapterType, actorType, actorId, allowed, force },
-      "Circuit-breaker reset request",
-    );
-
-    if (!allowed) {
+    // Step 1: Reject agent actors with auditable row (no state mutation).
+    if (req.actor.type === "agent") {
+      const actorId = req.actor.agentId ?? "unknown-agent";
+      const { auditRow } = resetBreaker(adapterType, "agent", actorId, false);
+      logger.info(
+        { adapterType, actorType: "agent", actorId, allowed: false, force },
+        "Circuit-breaker reset rejected: actor_is_agent",
+      );
       res.status(403).json({
         error: "Agent actors are not permitted to reset the circuit breaker (ADR-0006 §9 / CLI-91).",
         auditId: auditRow.id,
@@ -763,7 +766,16 @@ export function adapterRoutes() {
       return;
     }
 
+    // Step 2: Board org-access check BEFORE any state mutation (CLI-176 fix).
     assertBoardOrgAccess(req);
+
+    // Step 3: Authorized board actor — safe to mutate.
+    const actorId = req.actor.userId ?? "board";
+    const { auditRow } = resetBreaker(adapterType, "board", actorId, force === true);
+    logger.info(
+      { adapterType, actorType: "board", actorId, allowed: true, force },
+      "Circuit-breaker reset authorized",
+    );
     res.json({ adapterType, reset: true, phase: "Closed", auditId: auditRow.id });
   });
 

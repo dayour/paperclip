@@ -81,6 +81,18 @@ const boardMember: Express.Request["actor"] = {
   memberships: [{ companyId: "company-abc", membershipRole: "admin", status: "active" }],
 };
 
+/** Board actor with no company membership — assertBoardOrgAccess rejects this. */
+const boardNoOrg: Express.Request["actor"] = {
+  type: "board",
+  userId: "board-no-org",
+  userName: null,
+  userEmail: null,
+  source: "session",
+  isInstanceAdmin: false,
+  companyIds: [],
+  memberships: [],
+};
+
 function agentActor(agentId = "agent-test-id"): Express.Request["actor"] {
   return {
     type: "agent",
@@ -198,6 +210,22 @@ describe("POST /api/adapters/:type/circuit-breaker/force-quarantine", () => {
     const state = circuitBreaker.getCircuitState("copilot_local");
     expect(state?.phase).toBe("Open");
   });
+
+  // CLI-176 regression: board actor without org access must not mutate state
+  it("CLI-176: board actor without org access gets 403 with no auditId and no state mutation", async () => {
+    const res = await request(createApp(boardNoOrg))
+      .post("/api/adapters/copilot_local/circuit-breaker/force-quarantine")
+      .send({ reason: "unauthorized attempt" });
+
+    expect(res.status).toBe(403);
+    // No auditId on board-auth failure (only agent rejections get auditId)
+    expect(res.body.auditId).toBeUndefined();
+    // Circuit state must NOT have been mutated
+    expect(circuitBreaker.getCircuitState("copilot_local")).toBeNull();
+    // No success audit row written
+    const audit = circuitBreaker.getAuditLog();
+    expect(audit.find((r) => r.action === "force_quarantine" && r.outcome === "success")).toBeUndefined();
+  });
 });
 
 describe("POST /api/adapters/:type/circuit-breaker/reset", () => {
@@ -264,6 +292,26 @@ describe("POST /api/adapters/:type/circuit-breaker/reset", () => {
       .send({});
 
     expect(circuitBreaker.getCircuitState("copilot_local")?.phase).toBe("Closed");
+  });
+
+  // CLI-176 regression: board actor without org access must not mutate state
+  it("CLI-176: board actor without org access gets 403 with no auditId and state remains Open", async () => {
+    // Pre-condition: adapter is quarantined
+    circuitBreaker.forceQuarantine("copilot_local", "board", "admin-user");
+    expect(circuitBreaker.getCircuitState("copilot_local")?.phase).toBe("Open");
+
+    const res = await request(createApp(boardNoOrg))
+      .post("/api/adapters/copilot_local/circuit-breaker/reset")
+      .send({});
+
+    expect(res.status).toBe(403);
+    // No auditId on board-auth failure
+    expect(res.body.auditId).toBeUndefined();
+    // Adapter must remain Open — unauthorized board user could not clear quarantine
+    expect(circuitBreaker.getCircuitState("copilot_local")?.phase).toBe("Open");
+    // No success audit row for reset written
+    const audit = circuitBreaker.getAuditLog();
+    expect(audit.find((r) => r.action === "reset" && r.outcome === "success")).toBeUndefined();
   });
 });
 
