@@ -13,6 +13,46 @@ Out of scope: backend bridge state, token verification, audit-log rendering. Tho
 
 ---
 
+## 0.1. Web-app implementation mapping (addendum 2026-04-21)
+
+This spec inherits Electron-flavoured vocabulary from ADR-0005 ("renderer", "main process", "IPC channel"). Paperclip is a web app, not Electron. Translate as follows — this addendum is authoritative and overrides the prose (not the file paths in §9) wherever they conflict:
+
+| Spec term                               | Real Paperclip surface                                                                                                                   |
+|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------|
+| "renderer" / "renderer-side"            | The React UI in `ui/` (Vite app).                                                                                                         |
+| "main process"                          | The Paperclip server (`server/`), plus the `copilot-local` adapter that writes bridge-audit rows per ADR-0005.                           |
+| "IPC channel"                           | A `LiveEvent.kind` on the existing server→UI WebSocket stream consumed by `ui/src/context/LiveUpdatesProvider.tsx`. No Electron IPC.     |
+| `bridge:session-state`                  | `LiveEvent.kind = "bridge.session_state"` (full snapshot, debounced 250ms on the server before emit).                                    |
+| `bridge:deny-flash`                     | `LiveEvent.kind = "bridge.deny_flash"` (one message per audit row; **never coalesced server-side or client-side** — see §4).              |
+| `bridge:revoke` IPC                     | `POST /api/companies/:companyId/bridge-sessions/:jti/revoke` (REST, auth = board operator). Optimistic-UI rules in §6 are unchanged.    |
+| "status strip"                          | The top-of-window bar rendered by `ui/src/components/BreadcrumbBar.tsx`. Slot the badge immediately left of the existing `GlobalToolbarPlugins` outlet; that outlet is the spec's "connection-pill group" anchor. |
+| `<SidePanel>` primitive                 | `ui/src/components/ui/sheet.tsx` (`<Sheet />`, `<SheetContent side="right">`). "360px SidePanel" ⇒ `SheetContent` with `className="w-[360px] sm:max-w-[360px]"`. |
+| `<ConfirmDialog />`                     | `ui/src/components/ui/dialog.tsx`. Build a thin `ConfirmDialog` wrapper co-located with `BridgeSessionDetailPanel.tsx`; do not introduce a new global primitive for this work. |
+| "main-process audit-log write path"     | The `copilot-local` adapter's bridge-audit emitter (CLI-103). It publishes `bridge.deny_flash` LiveEvents over the same publisher used for `activity.*`. If that emitter does not yet exist on the copilot-local branch, file a blocker sub-issue on CLI-103 — do **not** fake it from a debounced snapshot diff. |
+
+### 0.1.1 Implementation base — greenfield, no hidden branch
+
+There is no pre-existing "renderer shell" to extend. All files listed in §9 are **new**. Cut the implementation branch directly off `master` at the latest canary tag (e.g. `canary/v2026.420.0-canary.11`, commit `1266954a` or later). Do **not** branch off `feat/copilot-local-adapter`; instead, declare a dependency on the `bridge.deny_flash` LiveEvent kind and land stubs + fixture-driven tests. The copilot-local adapter merge will flow in via ADR-0005.
+
+Minimum files to create, in dependency order:
+
+1. `ui/src/ipc/bridgeChannels.ts` — zod schemas + a `useBridgeLiveEvents()` hook that subscribes to `bridge.session_state` and `bridge.deny_flash` via the existing `LiveUpdatesProvider` context. The two kinds **must** be handled by separate subscriptions so the deny-flash path cannot be accidentally folded into the debounced snapshot reducer.
+2. `ui/src/state/bridgeSession.ts` — store + selectors (§5 shape). Computes `kind` from `exp` vs `Date.now()` on the animation frame.
+3. `ui/src/components/status-strip/BridgeSessionBadge.tsx` (+ `.module.css`, feature-flag-gated).
+4. `ui/src/components/status-strip/BridgeSessionDetailPanel.tsx` (uses `Sheet`).
+5. Slot into `BreadcrumbBar.tsx` directly before the `<GlobalToolbarPlugins … />` block; gate render behind the bridge feature flag so feature-off users get zero DOM.
+6. Storybook stories per §9, including the "rapid double deny" interaction story.
+
+### 0.1.2 Feature flag
+
+Use the existing company-scoped feature-flag plumbing (whatever `useFeatureFlag` / `useCompanyConfig` hook the codebase already exposes — pick the one used by `PluginLauncherOutlet`). Flag key: `bridge.session_indicator.v1`. Default off. No new flag infrastructure.
+
+### 0.1.3 Revoke endpoint contract
+
+Until the server endpoint lands, stub the revoke call behind a typed `revokeBridgeSession(jti)` client in `ui/src/api/bridge.ts` that hits the REST path above and returns `{ ok: true } | { ok: false, error: string }`. §6's optimistic-UI + 2s rollback rules apply unchanged. If the server endpoint is not merged by the time CLI-142 is ready to review, ship the client + mock handler for tests and file a follow-up sub-issue — do not block on it.
+
+---
+
 ## 1. Placement
 
 The badge lives in the top-of-window **status strip**, immediately to the **left of the connection pill**.
