@@ -32,7 +32,7 @@ type LiveUpdatesSocketLike = {
 };
 
 type LiveEventListener = (event: LiveEvent) => void;
-const LiveEventSubscriptionContext = createContext<((listener: LiveEventListener) => () => void) | null>(null);
+const LiveEventSubscriptionContext= createContext<((listener: LiveEventListener) => () => void) | null>(null);
 
 function readString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;

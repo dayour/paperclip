@@ -41,12 +41,9 @@ import { act, type ReactNode } from "react";
 import type React from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-
-// CLI-142 implemented — guard removed.
-const describeWhenImplemented = describe;
-
-// Real component import
 import { BridgeSessionBadge as Badge } from "./BridgeSessionBadge";
+
+const describeWhenImplemented = describe;
 
 // ── Minimal live-updates context mock ────────────────────────────────────────
 // The bridge live events hook subscribes to LiveUpdatesProvider context.
@@ -111,6 +108,12 @@ const mockRevokeApi = vi.hoisted(() => ({
 }));
 vi.mock("../../api/bridge", () => ({
   bridgeApi: mockRevokeApi,
+}));
+
+vi.mock("../../context/ToastContext", () => ({
+  useToastActions: () => ({
+    pushToast: vi.fn(),
+  }),
 }));
 
 // ── Test utilities ────────────────────────────────────────────────────────────
@@ -487,6 +490,7 @@ describeWhenImplemented("BridgeSessionBadge — ADR-0005 §8 / CLI-142", () => {
       await act(async () => {
         mockLiveEvents.emitDenyFlash(makeDenyFlash());
       });
+      await Promise.resolve();
       // Second deny 800ms later
       await act(async () => {
         vi.advanceTimersByTime(800);
