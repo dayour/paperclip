@@ -471,7 +471,6 @@ describeCircuitBreaker(
         const listRes = await request(app).get("/api/adapters/quarantine");
         expect(listRes.status).toBe(200);
         const releaseAudit = (listRes.body.auditLog ?? []) as Array<Record<string, unknown>>;
-        const routeKey = cb!.toRouteKey(ADAPTER_TYPE);
         // Accept either field naming: actor/action (ClippyEng format) or event/releasedBy (spec format)
         const resetEntry = releaseAudit.find(
           (e) =>
@@ -541,7 +540,6 @@ describeCircuitBreaker(
         // Rejection must still write an audit row (per CLI-91: rejected attempts audit-trailed)
         const listRes = await request(app).get("/api/adapters/quarantine");
         const auditLog = (listRes.body.auditLog ?? []) as Array<Record<string, unknown>>;
-        const routeKey = cb!.toRouteKey(ADAPTER_TYPE);
         // Accept either field naming: actor/action (ClippyEng format) or event/actorKind (spec format)
         const rejectedEntry = auditLog.find(
           (e) =>
