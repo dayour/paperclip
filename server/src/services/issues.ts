@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db, Tx } from "@paperclipai/db";
 import {
   agentWakeupRequests,
   activityLog,
@@ -46,6 +46,22 @@ const ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE = 500;
 export const MAX_CHILD_ISSUES_CREATED_BY_HELPER = 25;
 const MAX_CHILD_COMPLETION_SUMMARIES = 20;
 const CHILD_COMPLETION_SUMMARY_BODY_MAX_CHARS = 500;
+// How long a `queued` heartbeat run may remain in that state before the drain
+// helper treats it as a never-started orphan lock and cancels it.
+//
+// Background (CLI-104 / CLI-126): CLI-104 introduced auto-drain for `active`
+// (running) execution-run locks held by the wrong agent. CLI-126 extended the
+// same drain to the comment and PATCH write paths by factoring the logic into
+// this shared helper (`autoDrainStaleExecutionRunLock`), which is now called
+// from assertCheckoutOwner and checkoutAs as well.
+//
+// A `queued` run is a claimed startup lock: the agent has been woken but has
+// not yet transitioned the run to `running`. Under normal conditions this
+// transition is near-instant. A run still `queued` after 15 minutes means the
+// agent process never started or crashed before its first heartbeat.  That lock
+// is safe to cancel — it carries no live work.  The 15-minute window therefore
+// applies to all three call sites that route through this helper; do not narrow
+// it to the checkout path only.
 const STALE_QUEUED_LOCK_WINDOW_MS = 15 * 60 * 1000;
 
 function assertTransition(from: string, to: string) {
@@ -130,6 +146,9 @@ type IssueUserContextInput = {
 };
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
+// Single alias for the drain helpers so both the top-level db handle and a
+// transaction context are accepted without losing type safety.
+type DbOrTx = Db | Tx;
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
@@ -746,6 +765,7 @@ const issueListSelect = {
   requestDepth: issues.requestDepth,
   billingCode: issues.billingCode,
   assigneeAdapterOverrides: issues.assigneeAdapterOverrides,
+  quarantineHold: issues.quarantineHold,
   executionPolicy: sql<null>`null`,
   executionState: sql<null>`null`,
   executionWorkspaceId: issues.executionWorkspaceId,
@@ -1234,7 +1254,7 @@ export function issueService(db: Db) {
     actorAgentId: string;
     actorRunId: string;
     expectedCheckoutRunId: string;
-    dbOrTx?: any;
+    dbOrTx?: DbOrTx;
   }) {
     const dbOrTx = input.dbOrTx ?? db;
     const stale = await isTerminalOrMissingHeartbeatRun(input.expectedCheckoutRunId, dbOrTx);
@@ -1279,7 +1299,7 @@ export function issueService(db: Db) {
     issueId: string;
     actorAgentId: string;
     actorRunId: string;
-    dbOrTx?: any;
+    dbOrTx?: DbOrTx;
   }) {
     const dbOrTx = input.dbOrTx ?? db;
     return dbOrTx
@@ -1302,7 +1322,7 @@ export function issueService(db: Db) {
       .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
   }
 
-  async function autoDrainStaleExecutionRunLock(issueId: string, dbOrTx: any = db) {
+  async function autoDrainStaleExecutionRunLock(issueId: string, dbOrTx: DbOrTx = db) {
     const now = new Date();
     await dbOrTx.execute(sql`select id from issues where id = ${issueId} for update`);
 
