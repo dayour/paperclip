@@ -3,12 +3,14 @@ import { createCopilotClient } from "./sdk-client.js";
 import {
   normalizeCopilotDiscoveredModels,
   normalizeRuntimeEnv,
+  resolveGithubToken,
 } from "./runtime.js";
 import { DEFAULT_COPILOT_LOCAL_MODEL, models as fallbackModels } from "../index.js";
 
 const COPILOT_MODELS_CACHE_TTL_MS = 60_000;
 
 let cached: { expiresAt: number; models: AdapterModel[] } | null = null;
+let inflightDiscovery: Promise<AdapterModel[]> | null = null;
 
 async function safeStopClient(client: { stop(): Promise<unknown> } | null): Promise<void> {
   if (!client) return;
@@ -21,7 +23,7 @@ async function safeStopClient(client: { stop(): Promise<unknown> } | null): Prom
 
 export async function discoverCopilotModels(): Promise<AdapterModel[]> {
   const runtimeEnv = normalizeRuntimeEnv(process.env);
-  const githubToken = (runtimeEnv.GH_TOKEN ?? runtimeEnv.GITHUB_TOKEN ?? "").trim();
+  const githubToken = resolveGithubToken(runtimeEnv);
   if (!githubToken) return [];
 
   const client = await createCopilotClient({
@@ -51,23 +53,31 @@ export async function discoverCopilotModels(): Promise<AdapterModel[]> {
 export async function listModels(): Promise<AdapterModel[]> {
   const now = Date.now();
   if (cached && cached.expiresAt > now) return cached.models;
+  if (inflightDiscovery) return inflightDiscovery;
 
-  try {
-    const models = await discoverCopilotModels();
-    if (models.length > 0) {
-      cached = {
-        expiresAt: now + COPILOT_MODELS_CACHE_TTL_MS,
-        models,
-      };
+  inflightDiscovery = (async () => {
+    try {
+      const models = await discoverCopilotModels();
+      if (models.length > 0) {
+        cached = {
+          expiresAt: Date.now() + COPILOT_MODELS_CACHE_TTL_MS,
+          models,
+        };
+      }
+      return models;
+    } catch {
+      return [];
+    } finally {
+      inflightDiscovery = null;
     }
-    return models;
-  } catch {
-    return [];
-  }
+  })();
+
+  return await inflightDiscovery;
 }
 
 export function resetCopilotModelsCacheForTests(): void {
   cached = null;
+  inflightDiscovery = null;
 }
 
 export const listCopilotModels = listModels;
