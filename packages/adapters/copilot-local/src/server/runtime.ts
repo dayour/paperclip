@@ -349,6 +349,17 @@ export function normalizeEnvConfig(input: unknown): Record<string, string> {
   return normalizeRuntimeEnv(parseObject(input) as NodeJS.ProcessEnv);
 }
 
+export function resolveGithubToken(env: Record<string, string>): string | null {
+  const token = (env.COPILOT_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN ?? "").trim();
+  return token.length > 0 ? token : null;
+}
+
+export function extractCopilotStopErrors(result: unknown): Error[] {
+  if (result instanceof Error) return [result];
+  if (!Array.isArray(result)) return [];
+  return result.filter((value): value is Error => value instanceof Error);
+}
+
 export async function buildCopilotClientBootstrap(input: {
   command?: unknown;
   args?: unknown;

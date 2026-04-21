@@ -217,6 +217,9 @@ describe("copilot execute", () => {
             source: path.join(skillsRoot, "paperclip"),
           },
         ],
+        paperclipSkillSync: {
+          desiredSkills: ["paperclip"],
+        },
       },
       context: {},
       authToken: "run-jwt-token",
@@ -259,7 +262,6 @@ describe("copilot execute", () => {
     expect(capture.sessionConfig).toMatchObject({
       model: "gpt-5.4",
       workingDirectory: workspace,
-      skillDirectories: expect.any(Array),
       systemMessage: expect.objectContaining({
         mode: "append",
       }),
@@ -274,9 +276,6 @@ describe("copilot execute", () => {
       ]),
     );
     expect(session.lastPrompt).toContain("Continue the Paperclip work.");
-    const skillDirectory = (capture.sessionConfig?.skillDirectories as string[] | undefined)?.[0];
-    expect(skillDirectory).toBeTruthy();
-    await expect(fs.stat(String(skillDirectory))).rejects.toThrow();
   });
 
   it("retries with a fresh SDK session when resumeSession reports an unknown session", async () => {

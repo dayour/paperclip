@@ -25,6 +25,7 @@ import {
 import { parseCopilotJsonl } from "./parse.js";
 import {
   buildCopilotClientBootstrap,
+  extractCopilotStopErrors,
   buildLoggedInvocationEnv,
   isCopilotAuthRequiredMessage,
   isCopilotUnknownSessionMessage,
@@ -34,16 +35,12 @@ import {
   normalizeEnvConfig,
   normalizeRuntimeEnv,
   removeDirSafe,
+  resolveGithubToken,
   resolveCopilotModelSelection,
 } from "./runtime.js";
 import { isCopilotIdleTimeoutError, sendPromptAndWaitForIdle } from "./session.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
-
-function resolveGithubToken(env: Record<string, string>): string | null {
-  const token = (env.COPILOT_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN ?? "").trim();
-  return token.length > 0 ? token : null;
-}
 
 function createSessionParams(
   sessionId: string | null,
@@ -389,10 +386,16 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         writeLog("stderr", `[paperclip] ${error.message}`);
       } finally {
         if (unsubscribe) unsubscribe();
-        const stopResult = client ? await client.stop().catch(() => [] as Error[]) : [];
-        const stopErrors = Array.isArray(stopResult) ? (stopResult as Error[]) : [];
+        let stopResult: unknown = null;
+        if (client) {
+          try {
+            stopResult = await client.stop();
+          } catch (error) {
+            stopResult = error;
+          }
+        }
+        const stopErrors = extractCopilotStopErrors(stopResult);
         for (const error of stopErrors) {
-          if (!error) continue;
           writeLog("stderr", `[paperclip] ${error.message}`);
         }
         await Promise.allSettled(logWrites);

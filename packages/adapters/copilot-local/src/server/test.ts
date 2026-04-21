@@ -13,10 +13,12 @@ import { DEFAULT_COPILOT_LOCAL_MODEL } from "../index.js";
 import { createCopilotClient, approveAll } from "./sdk-client.js";
 import {
   buildCopilotClientBootstrap,
+  extractCopilotStopErrors,
   isCopilotAuthRequiredMessage,
   normalizeCopilotDiscoveredModels,
   normalizeEnvConfig,
   normalizeRuntimeEnv,
+  resolveGithubToken,
   resolveCopilotModelSelection,
 } from "./runtime.js";
 import { sendPromptAndWaitForIdle } from "./session.js";
@@ -25,11 +27,6 @@ function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentT
   if (checks.some((check) => check.level === "error")) return "fail";
   if (checks.some((check) => check.level === "warn")) return "warn";
   return "pass";
-}
-
-function resolveGithubToken(env: Record<string, string>): string | null {
-  const token = (env.COPILOT_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN ?? "").trim();
-  return token.length > 0 ? token : null;
 }
 
 export async function testEnvironment(
@@ -266,7 +263,20 @@ export async function testEnvironment(
         : "If you configured a custom command override, verify it points to a compatible Copilot CLI binary.",
     });
   } finally {
-    await client.stop().catch(() => []);
+    let stopResult: unknown = null;
+    try {
+      stopResult = await client.stop();
+    } catch (error) {
+      stopResult = error;
+    }
+    for (const error of extractCopilotStopErrors(stopResult)) {
+      checks.push({
+        code: "copilot_sdk_stop_failed",
+        level: "warn",
+        message: "Copilot SDK cleanup reported an error.",
+        detail: error.message,
+      });
+    }
   }
 
   return {
