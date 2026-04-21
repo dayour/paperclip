@@ -7,7 +7,12 @@ summary: Isolate a failing adapter so one bad adapter cannot wedge the entire fl
 
 **Issue:** CLI-121
 **Parent:** CLI-75 (fleet outage postmortem, 2026-04-20)
-**Status:** Draft — for CTO/DevOps/QA review
+**Status:** Approved (v3) — ClippyQA + ClippyArch sign-off; awaiting ClippyEng call-site confirmation + ClippyCTO final ack before implementation tickets open
+
+**Revision history:**
+- v1 — initial draft (ClippyArch, 01:39 UTC).
+- v2 — rubber-duck design review, 10 substantive findings folded (two-shape keying, Open=DEFERS, probe CAS lease, failure classification, etc.).
+- v3 — QA spec review @ 02:32 UTC: 3 acceptance gaps closed, 2 §-level clarifications, 2 minor hardenings (this revision).
 
 ## Problem
 
@@ -52,6 +57,8 @@ When the breaker trips for `adapterType=X`:
 3. Issues assigned to quarantined agents are **not** auto-blocked. They retain their current status with a `quarantineHold` flag on their execution record. This avoids the CLI-75 secondary symptom where 30+ issues flipped to blocked and required manual rehydration.
 4. Emit a single `adapter.quarantined` event (distinct from the per-agent `adapter_failed` events) so alerting/dashboards can show one row, not N.
 
+**Assignment to a quarantined agent (QA gap #3).** New issue assignment to an agent whose current adapter is `quarantined` is **permitted** and stamps `quarantineHold=true` on the execution record at assignment time (no run is started). The issue moves to the agent's queue and waits for release. Rationale: blocking assignment would flip the failure mode back to "fleet stalls on assignment," which is exactly what quarantine is designed to avoid.
+
 ### 4. Release (two paths)
 
 The breaker releases `X` when **either**:
@@ -59,7 +66,7 @@ The breaker releases `X` when **either**:
 - **Automatic probe-based release.** A background health probe runs every `probeIntervalSec` (default `30s`) and executes the adapter's `healthCheck()` (new required adapter method; see §5). After `probeSuccessCount` consecutive successes (default `3`), the breaker releases automatically. Agents transition `quarantined → idle` and resume on their next heartbeat.
 - **Manual operator release.** `POST /api/adapters/{adapterType}/release-quarantine` (board-operator-only) clears quarantine immediately, optionally with `force=true` to skip the probe confirmation. Release emits `adapter.quarantine_released` with `releasedBy` and `reason`.
 
-On release, the trip counters reset. If the breaker trips again within `reTripGraceSec` (default `120s`), the trip thresholds are halved for the next window — repeated flapping should escalate, not silently cycle.
+On release, the trip counters reset **and** every `quarantineHold=true` flag belonging to issues bound to adapter `X` is cleared in the same transaction (QA gap #2). The next agent heartbeat for those issues then resumes normal execution; no manual rehydration is needed. If the breaker trips again within `reTripGraceSec` (default `120s`), the trip thresholds are halved for the next window — repeated flapping should escalate, not silently cycle.
 
 ### 5. Adapter contract changes
 
@@ -81,7 +88,7 @@ interface HealthCheckResult {
 Semantics:
 
 - MUST NOT spawn a full agent run. Lightweight only (e.g., `copilot --version`, SDK connectivity check, `which` on the adapter's configured `command`).
-- MUST respect `ctx.timeoutMs` (default `5000`). A hung probe counts as a failure.
+- MUST respect `ctx.timeoutMs` (default `5000`). A hung probe **and** an explicit `{ ok: false }` return are weighted equally as a probe failure (QA minor #2). Both reset `probeSuccessCount` and count toward the next trip evidence.
 - MUST be idempotent and side-effect-free.
 
 For built-ins, the work is small (copilot_local: reuse the CLI-77 adapter-health-probe check; process: verify `command` resolves; http: HEAD/GET against the configured URL). External adapters get a one-release deprecation window where a missing `healthCheck` degrades to "probe unavailable → manual release only" rather than breaking the plugin.
@@ -123,7 +130,7 @@ The CLI-84 alert fires when ≥3 agents hit `adapter_failed` within 60s. With th
 
 ### 9. Interaction with CLI-91 actor-trust
 
-Quarantine release is a state-changing action. It MUST honor the CLI-91 default-deny actor-trust rule: only `"user"` actors can release via the manual API. Probe-based automatic release is permitted because the probe itself is a first-class trusted signal, not an actor-authored comment.
+Quarantine release is a state-changing action. It MUST honor the CLI-91 default-deny actor-trust rule: only `"user"` actors can release via the manual API. **Agent actors are explicitly forbidden** from triggering manual release, including `force=true` (QA minor #1) — a compromised agent must not be able to lift its own quarantine. Probe-based automatic release is permitted because the probe itself is a first-class trusted signal, not an actor-authored comment.
 
 ## Failure modes and mitigations
 
@@ -151,15 +158,18 @@ Quarantine release is a state-changing action. It MUST honor the CLI-91 default-
 - [ ] Quarantined agents transition to `quarantined` status (distinct from `error`); issues assigned to them are **not** auto-blocked.
 - [ ] Automatic release after probe confirmation; manual release via API (gated to `user` actors per CLI-91).
 - [ ] End-to-end test: simulate `copilot_local` adapter failure → verify breaker trips, agents move to `quarantined`, issues stay open with `quarantineHold`, probe restores → breaker releases → agents resume.
+- [ ] **Re-trip threshold halving test (QA gap #1).** Trip → release → re-trip within `reTripGraceSec` → verify `nBurst`/`nSustained` are halved (rounded up) for the next window. Subsequent re-trip within grace halves again until floor of 1.
+- [ ] **quarantineHold cleanup on release.** Unit test verifying that on either probe-based or manual release, every `quarantineHold` flag for the released adapter type is cleared in the same transaction; assigned-while-quarantined issues then execute on next heartbeat.
+- [ ] **Assignment-to-quarantined-agent.** Unit test: assigning a new issue to a quarantined agent succeeds and stamps `quarantineHold=true` at assignment time (no run started); release path then drains it.
 - [ ] Dashboard banner + `/api/adapters/quarantine` endpoint.
 - [ ] Runbook entry in `docs/runbooks/` for "how to force-release / force-quarantine an adapter."
 - [ ] Shadow-mode rollout validated with one week of data before enforcement.
 
-## Open questions
+## Open questions (resolved)
 
-1. **Issue-level hold semantics.** Should `quarantineHold` surface to users in the issue UI (explicit "held — adapter quarantined" badge), or stay internal? Recommend surfacing — aligns with the "durable artefact" tone of the CLI-75 postmortem.
-2. **Cross-project scope.** Quarantine is per adapter *type* today. Should it be per adapter *instance* (i.e., one misconfigured `copilot_local` env separate from a healthy one)? Recommend: ship per-type first; revisit per-instance if real-world incidents demand it.
-3. **Healthcheck sampling cost.** `30s` probe interval × N adapter types is cheap for built-ins but could matter for external HTTP adapters. Revisit interval per-adapter if probes become a load issue.
+1. **Issue-level hold semantics.** ✅ **Surface in UI.** ClippyQA confirmed: an explicit "held — adapter quarantined" badge prevents "why is my ticket not moving" support noise. Internal-only is a support liability.
+2. **Cross-project scope.** ✅ **Per adapter type for v1.** ClippyQA confirmed: the v2 two-shape keying already differentiates by module identity for shared-env adapters; revisit per-instance only if a real incident demands it.
+3. **Healthcheck sampling cost.** Tracked but unresolved — `30s` probe interval × N adapter types is cheap for built-ins but could matter for external HTTP adapters. Revisit interval per-adapter if probes become a load issue. Not a blocker for v1.
 
 ## Follow-up tickets (to open after this spec is approved)
 
