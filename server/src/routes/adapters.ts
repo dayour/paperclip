@@ -45,6 +45,12 @@ import { loadExternalAdapterPackage, getUiParserSource, getOrExtractUiParserSour
 import { logger } from "../middleware/logger.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
+import {
+  forceQuarantine,
+  resetBreaker,
+  getAllCircuitStates,
+  getAuditLog,
+} from "../adapters/circuit-breaker.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -668,6 +674,104 @@ export function adapterRoutes() {
       return;
     }
     res.type("application/javascript").send(source);
+  });
+
+  // ── GET /api/adapters/quarantine ─────────────────────────────────────────
+  // Returns current circuit-breaker quarantine state for all adapter types.
+  // Per ADR-0006 §7 observability requirement.
+  router.get("/adapters/quarantine", (req, res) => {
+    assertBoardOrgAccess(req);
+    const states = getAllCircuitStates();
+    const result: Record<string, unknown> = {};
+    for (const [type, state] of states) {
+      result[type] = state;
+    }
+    res.json({ quarantine: result });
+  });
+
+  // ── POST /api/adapters/:type/circuit-breaker/force-quarantine ───────────
+  // Manually force an adapter into quarantine (Open) state.
+  // Per ADR-0006 §9: only board (human) actors may trigger; agents are
+  // rejected even if they have valid credentials. Rejection is auditable.
+  router.post("/adapters/:type/circuit-breaker/force-quarantine", (req, res) => {
+    if (req.actor.type === "none") {
+      res.status(401).json({ error: "Authentication required." });
+      return;
+    }
+
+    const adapterType = req.params.type;
+    const { reason } = req.body as { reason?: string };
+
+    const actorType = req.actor.type === "agent" ? "agent" : "board";
+    const actorId =
+      req.actor.type === "agent"
+        ? (req.actor.agentId ?? "unknown-agent")
+        : (req.actor.userId ?? "board");
+
+    const { allowed, auditRow } = forceQuarantine(adapterType, actorType, actorId, reason);
+
+    logger.info(
+      { adapterType, actorType, actorId, allowed, reason },
+      "Circuit-breaker force-quarantine request",
+    );
+
+    if (!allowed) {
+      res.status(403).json({
+        error: "Agent actors are not permitted to manually quarantine adapters (ADR-0006 §9 / CLI-91).",
+        auditId: auditRow.id,
+        rejectionReason: auditRow.rejectionReason,
+      });
+      return;
+    }
+
+    assertBoardOrgAccess(req);
+    res.json({ adapterType, quarantined: true, auditId: auditRow.id });
+  });
+
+  // ── POST /api/adapters/:type/circuit-breaker/reset ──────────────────────
+  // Reset the circuit breaker to Closed state (manual operator release).
+  // Per ADR-0006 §9: only board (human) actors may trigger; agents are
+  // rejected even if they have valid credentials. Rejection is auditable.
+  router.post("/adapters/:type/circuit-breaker/reset", (req, res) => {
+    if (req.actor.type === "none") {
+      res.status(401).json({ error: "Authentication required." });
+      return;
+    }
+
+    const adapterType = req.params.type;
+    const { force } = req.body as { force?: boolean };
+
+    const actorType = req.actor.type === "agent" ? "agent" : "board";
+    const actorId =
+      req.actor.type === "agent"
+        ? (req.actor.agentId ?? "unknown-agent")
+        : (req.actor.userId ?? "board");
+
+    const { allowed, auditRow } = resetBreaker(adapterType, actorType, actorId, force === true);
+
+    logger.info(
+      { adapterType, actorType, actorId, allowed, force },
+      "Circuit-breaker reset request",
+    );
+
+    if (!allowed) {
+      res.status(403).json({
+        error: "Agent actors are not permitted to reset the circuit breaker (ADR-0006 §9 / CLI-91).",
+        auditId: auditRow.id,
+        rejectionReason: auditRow.rejectionReason,
+      });
+      return;
+    }
+
+    assertBoardOrgAccess(req);
+    res.json({ adapterType, reset: true, phase: "Closed", auditId: auditRow.id });
+  });
+
+  // ── GET /api/adapters/circuit-breaker/audit ──────────────────────────────
+  // Returns the recent circuit-breaker audit log (last 500 rows).
+  router.get("/adapters/circuit-breaker/audit", (req, res) => {
+    assertInstanceAdmin(req);
+    res.json({ auditLog: getAuditLog() });
   });
 
   return router;
