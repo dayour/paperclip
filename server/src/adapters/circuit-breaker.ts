@@ -193,9 +193,9 @@ export function getConfig(): Readonly<BreakerConfig> {
   return _config;
 }
 
-export function getCircuitState(adapterType: string): CircuitState | null {
-  return registry.get(adapterType) ?? null;
-}
+// getCircuitState is defined below in the integration contract section with an
+// enriched return type that satisfies both admin-routes tests (.phase) and
+// the CLI-162 integration tests (.state, .quarantinedAt, .resumeAt as Date).
 
 export function getAllCircuitStates(): ReadonlyMap<string, CircuitState> {
   return registry;
@@ -411,4 +411,254 @@ export function _resetForTesting(): void {
   failureWindow.clear();
   auditRing.length = 0;
   _config = { ...DEFAULT_CONFIG };
+}
+
+// ── Integration contract (CLI-162) ────────────────────────────────────────
+// These exports satisfy the circuit-breaker-integration.test.ts contract and
+// are used in CLI-162 integration tests. They are either thin wrappers around
+// the above functions or DB-aware async helpers.
+
+import type { Db } from "@paperclipai/db";
+import { agents, issues, agentWakeupRequests } from "@paperclipai/db";
+import { eq, and, notInArray } from "drizzle-orm";
+
+/** Enriched circuit state returned by getCircuitState (integration contract). */
+export type IntegrationCircuitState = Omit<CircuitState, "resumeAt"> & {
+  /** Lowercase phase name for integration test compatibility. */
+  state: "closed" | "open" | "half-open";
+  /** Alias for trippedAt as a Date object. */
+  quarantinedAt: Date | null;
+  /** resumeAt as a Date object (overrides number|null from CircuitState). */
+  resumeAt: Date | null;
+};
+
+/** Per-adapter-type Half-Open probe CAS lease (in-process only). */
+const probeLease = new Map<string, boolean>();
+
+/** Reset all in-memory circuit state including probe leases (test isolation). */
+export function resetAllCircuits(): void {
+  _resetForTesting();
+  probeLease.clear();
+}
+
+/**
+ * Returns circuit state enriched with integration-contract fields.
+ * Keeps existing `phase` (capitalized) for backward compat with admin-routes tests.
+ * Adds `state` (lowercase), `quarantinedAt` (Date|null), `resumeAt` (Date|null).
+ */
+export function getCircuitState(adapterType: string): IntegrationCircuitState | null {
+  const s = registry.get(adapterType);
+  if (!s) return null;
+  return {
+    ...s,
+    state: s.phase === "Closed" ? "closed" : s.phase === "Open" ? "open" : "half-open",
+    quarantinedAt: s.trippedAt !== null ? new Date(s.trippedAt) : null,
+    resumeAt: s.resumeAt !== null ? new Date(s.resumeAt) : null,
+  };
+}
+
+/** Returns the effective burst/sustained thresholds (may be halved after re-trip). */
+export function getEffectiveThreshold(adapterType: string): { nBurst: number; nSustained: number } {
+  const s = registry.get(adapterType);
+  if (!s) return { nBurst: _config.nBurst, nSustained: _config.nSustained };
+  return { nBurst: s.effectiveNBurst, nSustained: s.effectiveNSustained };
+}
+
+/**
+ * Test helper: directly advance an Open circuit to Half-Open, skipping cooldown.
+ * This is NOT a production code path — test isolation only.
+ */
+export function advanceToHalfOpen(adapterType: string): void {
+  const s = registry.get(adapterType);
+  if (!s) return;
+  s.phase = "HalfOpen";
+  s.resumeAt = Date.now() - 1;
+  s.probeSuccessCount = 0;
+}
+
+/**
+ * Test helper: advance the re-trip grace window past expiry so thresholds reset.
+ * Sets lastReleasedAt far enough in the past and resets thresholds.
+ */
+export function advancePastReTripGrace(adapterType: string): void {
+  const s = registry.get(adapterType);
+  if (!s) return;
+  s.lastReleasedAt = Date.now() - _config.reTripGraceMs - 1;
+  resetThresholdsIfStable(s, Date.now());
+}
+
+/** Returns a URL-safe route key for an adapter type (for admin route paths). */
+export function toRouteKey(adapterType: string): string {
+  return adapterType.replace(/[^a-zA-Z0-9_-]/g, "_");
+}
+
+/** Returns true if a Half-Open probe CAS lease is currently held in-process. */
+export function probeLeaseHeld(adapterType: string): boolean {
+  return probeLease.get(adapterType) ?? false;
+}
+
+/**
+ * Record an adapter failure with DB side-effects.
+ *
+ * When the failure trips the circuit (Closed→Open):
+ *   - Marks all agents using this adapterType as "quarantined".
+ *   - Sets executionState.quarantineHold=true on their open issues.
+ *   - Creates agentWakeupRequests rows so issues re-wake after the circuit opens.
+ *
+ * When the circuit is already Open (not a new trip):
+ *   - Stamps quarantineHold on the calling agent's issues that aren't yet stamped.
+ *   - Creates wakeup rows for those newly-stamped issues.
+ */
+export async function recordAdapterFailure(
+  db: Db,
+  opts: { adapterType: string; agentId: string; reason: string },
+): Promise<{ tripped: boolean }> {
+  const { adapterType, agentId, reason } = opts;
+  const tripped = recordFailure({
+    adapterType,
+    agentId,
+    failureReason: reason,
+    occurredAt: Date.now(),
+  });
+
+  const state = registry.get(adapterType);
+  if (!state || state.phase !== "Open") return { tripped };
+
+  const resumeAtMs = state.resumeAt ?? Date.now() + _config.probeIntervalMs;
+
+  if (tripped) {
+    // New trip: quarantine ALL agents with this adapterType and stamp all their issues.
+    await db.update(agents).set({ status: "quarantined" }).where(eq(agents.adapterType, adapterType));
+
+    const affectedAgents = await db
+      .select({ id: agents.id, companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.adapterType, adapterType));
+
+    for (const agent of affectedAgents) {
+      await _stampAndWakeIssues(db, agent.id, agent.companyId, adapterType, resumeAtMs);
+    }
+  } else {
+    // Already open: stamp only the calling agent's issues that aren't yet stamped.
+    const agentRow = await db
+      .select({ companyId: agents.companyId })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    const companyId = agentRow[0]?.companyId;
+    if (companyId) {
+      await _stampAndWakeIssues(db, agentId, companyId, adapterType, resumeAtMs);
+    }
+  }
+
+  return { tripped };
+}
+
+/** Internal helper: stamp quarantineHold + create wakeup for unstamped issues. */
+async function _stampAndWakeIssues(
+  db: Db,
+  agentId: string,
+  companyId: string,
+  adapterType: string,
+  resumeAtMs: number,
+): Promise<void> {
+  const agentIssues = await db
+    .select({ id: issues.id, executionState: issues.executionState })
+    .from(issues)
+    .where(
+      and(
+        eq(issues.assigneeAgentId, agentId),
+        notInArray(issues.status, ["done", "cancelled"]),
+      ),
+    );
+
+  for (const issue of agentIssues) {
+    const execState = (issue.executionState ?? {}) as Record<string, unknown>;
+    if (execState.quarantineHold) continue; // already stamped
+
+    await db
+      .update(issues)
+      .set({ executionState: { ...execState, quarantineHold: true } })
+      .where(eq(issues.id, issue.id));
+
+    await db.insert(agentWakeupRequests).values({
+      companyId,
+      agentId,
+      issueId: issue.id,
+      source: "circuit_breaker_quarantine",
+      reason: `Adapter quarantined: ${adapterType}`,
+      scheduledAt: new Date(resumeAtMs),
+      status: "pending",
+    });
+  }
+}
+
+/**
+ * Run a Half-Open probe round with DB side-effects and CAS lease protection.
+ *
+ * The probe lease (in-process Map) ensures that concurrent callers within the
+ * same process see exactly one probe execute per adapter per microtask batch.
+ *
+ * On circuit release (3 consecutive successes):
+ *   - Restores agents using this adapterType to "idle".
+ *   - Clears executionState.quarantineHold from their issues.
+ *   - Creates re-promotion agentWakeupRequests for each cleared issue.
+ */
+export async function runProbeRound(
+  db: Db,
+  adapterType: string,
+  probeResult: { ok: boolean },
+): Promise<{ released: boolean; probeExecuted: boolean }> {
+  if (probeLease.get(adapterType)) {
+    return { released: false, probeExecuted: false };
+  }
+  probeLease.set(adapterType, true);
+  // Yield so concurrent callers (e.g. Promise.all) observe the lease before we
+  // reach the synchronous recordProbeResult call in the non-release path.
+  await Promise.resolve();
+
+  try {
+    const result = recordProbeResult(adapterType, probeResult.ok);
+    const released = result === "released";
+
+    if (released) {
+      await db.update(agents).set({ status: "idle" }).where(eq(agents.adapterType, adapterType));
+
+      const affectedAgents = await db
+        .select({ id: agents.id, companyId: agents.companyId })
+        .from(agents)
+        .where(eq(agents.adapterType, adapterType));
+
+      for (const agent of affectedAgents) {
+        const heldIssues = await db
+          .select({ id: issues.id, executionState: issues.executionState })
+          .from(issues)
+          .where(eq(issues.assigneeAgentId, agent.id));
+
+        for (const issue of heldIssues) {
+          const execState = issue.executionState as Record<string, unknown> | null;
+          if (!execState?.quarantineHold) continue;
+
+          const { quarantineHold: _, ...rest } = execState;
+          await db
+            .update(issues)
+            .set({ executionState: Object.keys(rest).length > 0 ? rest : null })
+            .where(eq(issues.id, issue.id));
+
+          await db.insert(agentWakeupRequests).values({
+            companyId: agent.companyId,
+            agentId: agent.id,
+            issueId: issue.id,
+            source: "circuit_breaker_release",
+            reason: `Adapter released: ${adapterType}`,
+            scheduledAt: new Date(),
+            status: "pending",
+          });
+        }
+      }
+    }
+
+    return { released, probeExecuted: true };
+  } finally {
+    probeLease.delete(adapterType);
+  }
 }

@@ -8,6 +8,9 @@ export const agentWakeupRequests = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     companyId: uuid("company_id").notNull().references(() => companies.id),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
+    /** Issue associated with this wakeup request. FK enforced by DB migration (0060). */
+    issueId: uuid("issue_id"),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
     source: text("source").notNull(),
     triggerDetail: text("trigger_detail"),
     reason: text("reason"),
