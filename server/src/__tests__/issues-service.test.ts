@@ -1251,6 +1251,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -1590,6 +1592,15 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       executionRunId,
       executionAgentNameKey: "lock-owner",
     });
+    // actorRunId must exist in heartbeat_runs to satisfy issues.checkout_run_id FK
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      createdAt: new Date(),
+      startedAt: new Date(),
+    });
 
     const ownership = await svc.assertCheckoutOwner(issueId, assigneeAgentId, actorRunId);
     const comment = await svc.addComment(issueId, "Recovered without checkout", {
@@ -1692,6 +1703,15 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       assigneeAgentId,
       executionRunId,
       executionAgentNameKey: "lock-owner",
+    });
+    // actorRunId must exist in heartbeat_runs to satisfy issues.checkout_run_id FK
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      createdAt: new Date(),
+      startedAt: new Date(),
     });
 
     const ownership = await svc.assertCheckoutOwner(issueId, assigneeAgentId, actorRunId);
