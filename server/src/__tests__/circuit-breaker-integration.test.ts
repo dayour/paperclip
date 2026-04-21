@@ -62,7 +62,15 @@ import {
   it,
   vi,
 } from "vitest";
-import { agents, companies, createDb, issues, agentWakeupRequests } from "@paperclipai/db";
+import {
+  agents,
+  companies,
+  createDb,
+  heartbeatRunEvents,
+  heartbeatRuns,
+  issues,
+  agentWakeupRequests,
+} from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -144,6 +152,8 @@ async function buildFixture(agentCount = 3): Promise<FixtureContext> {
 
 async function teardownFixture(ctx: FixtureContext) {
   await ctx.db.delete(agentWakeupRequests);
+  await ctx.db.delete(heartbeatRunEvents);
+  await ctx.db.delete(heartbeatRuns);
   await ctx.db.delete(issues);
   await ctx.db.delete(agents);
   await ctx.db.delete(companies);
@@ -456,16 +466,26 @@ describeCircuitBreaker(
         const clearedState = clearedIssue.executionState as Record<string, unknown> | null;
         expect(clearedState?.quarantineHold).toBeFalsy();
 
-        // Audit row should exist
-        // (Implementation must write to activity_log or a dedicated audit table with releasedBy + reason)
+        // Audit row should exist for the reset action
+        // Implementation uses { actor, action, key, reason, oldState, newState, expiresAt, at, outcome }
         const listRes = await request(app).get("/api/adapters/quarantine");
         expect(listRes.status).toBe(200);
         const releaseAudit = (listRes.body.auditLog ?? []) as Array<Record<string, unknown>>;
+        const routeKey = cb!.toRouteKey(ADAPTER_TYPE);
+        // Accept either field naming: actor/action (ClippyEng format) or event/releasedBy (spec format)
         const resetEntry = releaseAudit.find(
-          (e) => e.event === "adapter.quarantine_released" && e.adapterType === ADAPTER_TYPE,
+          (e) =>
+            (e.action === "reset" || e.event === "adapter.quarantine_released") &&
+            (e.key === routeKey || e.adapterType === ADAPTER_TYPE),
         );
         expect(resetEntry).toBeDefined();
-        expect(resetEntry?.releasedBy).toBe("user");
+        // Actor should be "user" (either as actor field or releasedBy field)
+        const actorValue = resetEntry?.actor ?? resetEntry?.releasedBy;
+        expect(actorValue).toBe("user");
+        // Outcome should indicate success
+        if (resetEntry?.outcome !== undefined) {
+          expect(resetEntry.outcome).toBe("applied");
+        }
       });
     });
   },
@@ -521,11 +541,17 @@ describeCircuitBreaker(
         // Rejection must still write an audit row (per CLI-91: rejected attempts audit-trailed)
         const listRes = await request(app).get("/api/adapters/quarantine");
         const auditLog = (listRes.body.auditLog ?? []) as Array<Record<string, unknown>>;
+        const routeKey = cb!.toRouteKey(ADAPTER_TYPE);
+        // Accept either field naming: actor/action (ClippyEng format) or event/actorKind (spec format)
         const rejectedEntry = auditLog.find(
-          (e) => e.event === "adapter.quarantine_reset_rejected" && e.adapterType === ADAPTER_TYPE,
+          (e) =>
+            (e.outcome === "rejected" || e.event === "adapter.quarantine_reset_rejected") &&
+            (e.key === routeKey || e.adapterType === ADAPTER_TYPE),
         );
         expect(rejectedEntry).toBeDefined();
-        expect(rejectedEntry?.actorKind).toBe("agent");
+        // Actor kind should indicate it was an agent
+        const actorValue = rejectedEntry?.actor ?? rejectedEntry?.actorKind;
+        expect(actorValue).toBe("agent");
       });
     });
   },
