@@ -1373,6 +1373,130 @@ export function issueService(db: Db) {
     });
   }
 
+  // Restored from CLI-180 commit 30913679 ("Extend stale execution drain to write
+  // paths"). The cli-180-sync merge dropped this function and its call sites,
+  // which broke 4 issues-service tests + 5 e2e signoff-policy tests. The
+  // function detects orphan/stale execution_run locks (terminal, missing,
+  // long-queued, long-running with dead heartbeat) and atomically clears the
+  // issue lock, cancels the orphan run + its wakeup request, and emits an
+  // activity-log entry so the next ownership check on a write path can adopt.
+  async function autoDrainStaleExecutionRunLock(issueId: string, dbOrTx: any = db) {
+    const now = new Date();
+    await dbOrTx.execute(sql`select id from issues where id = ${issueId} for update`);
+
+    const issue = await dbOrTx
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionRunId: issues.executionRunId,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows: Array<{
+        id: string;
+        companyId: string;
+        assigneeAgentId: string | null;
+        executionRunId: string | null;
+      }>) => rows[0] ?? null);
+    if (!issue?.executionRunId) return null;
+
+    const lockRun = await dbOrTx
+      .select({
+        id: heartbeatRuns.id,
+        status: heartbeatRuns.status,
+        agentId: heartbeatRuns.agentId,
+        startedAt: heartbeatRuns.startedAt,
+        createdAt: heartbeatRuns.createdAt,
+        wakeupRequestId: heartbeatRuns.wakeupRequestId,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, issue.executionRunId))
+      .then((rows: Array<{
+        id: string;
+        status: string;
+        agentId: string;
+        startedAt: Date | null;
+        createdAt: Date;
+        wakeupRequestId: string | null;
+      }>) => rows[0] ?? null);
+
+    if (lockRun && !shouldClearStaleExecutionLock(lockRun, issue.assigneeAgentId, now)) {
+      return null;
+    }
+
+    const activeStaleReason = lockRun?.status === "running"
+      ? "stale_running_run"
+      : lockRun?.status === "queued"
+        ? "stale_queued_run"
+        : null;
+
+    const clearedIssue = await dbOrTx
+      .update(issues)
+      .set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, updatedAt: now })
+      .where(and(eq(issues.id, issueId), eq(issues.executionRunId, issue.executionRunId)))
+      .returning({ id: issues.id })
+      .then((rows: Array<{ id: string }>) => rows[0] ?? null);
+    if (!clearedIssue) return null;
+
+    if (!lockRun || !activeStaleReason) {
+      return null;
+    }
+
+    const [cancelledRun] = await dbOrTx
+      .update(heartbeatRuns)
+      .set({
+        status: "cancelled",
+        error: `stale execution lock auto-drained (${activeStaleReason})`,
+        finishedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(heartbeatRuns.id, lockRun.id),
+          inArray(heartbeatRuns.status, ["queued", "running"]),
+        ),
+      )
+      .returning({
+        id: heartbeatRuns.id,
+        wakeupRequestId: heartbeatRuns.wakeupRequestId,
+      });
+
+    if (cancelledRun?.wakeupRequestId) {
+      await dbOrTx
+        .update(agentWakeupRequests)
+        .set({
+          status: "cancelled",
+          finishedAt: now,
+          error: `stale execution lock auto-drained (${activeStaleReason})`,
+          updatedAt: now,
+        })
+        .where(eq(agentWakeupRequests.id, cancelledRun.wakeupRequestId));
+    }
+
+    await dbOrTx.insert(activityLog).values({
+      companyId: issue.companyId,
+      actorType: "system",
+      actorId: "issue_service:auto_drain",
+      action: "issue.execution_run_auto_drained",
+      entityType: "issue",
+      entityId: issue.id,
+      agentId: issue.assigneeAgentId,
+      runId: lockRun.id,
+      details: {
+        orphanRunId: lockRun.id,
+        orphanAgentId: lockRun.agentId,
+        currentAssigneeAgentId: issue.assigneeAgentId,
+        reason: activeStaleReason,
+      },
+    });
+
+    return {
+      orphanRunId: lockRun.id,
+      reason: activeStaleReason,
+    };
+  }
+
   return {
     clearExecutionRunIfTerminal,
 
@@ -2245,7 +2369,12 @@ export function issueService(db: Db) {
 
       const now = new Date();
 
-      await clearExecutionRunIfTerminal(id);
+      // Drain stale/orphan execution_run locks (terminal, missing, stale-queued,
+      // stale-running) so a dead lock from a prior agent can't 409 a legitimate
+      // checkout. Wrapped in a transaction with SELECT FOR UPDATE for atomicity.
+      await db.transaction(async (tx) => {
+        await autoDrainStaleExecutionRunLock(id, tx);
+      });
 
       const dependencyReadiness = await listIssueDependencyReadinessMap(db, issueCompany.companyId, [id]);
       const unresolvedBlockerIssueIds = dependencyReadiness.get(id)?.unresolvedBlockerIssueIds ?? [];
@@ -2361,7 +2490,11 @@ export function issueService(db: Db) {
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {
-      await clearExecutionRunIfTerminal(id);
+      // Drain stale/orphan execution_run locks before reading current ownership,
+      // so write paths (comments, patches, signoffs) can adopt instead of 409.
+      await db.transaction(async (tx) => {
+        await autoDrainStaleExecutionRunLock(id, tx);
+      });
       const current = await db
         .select({
           id: issues.id,
@@ -2375,6 +2508,19 @@ export function issueService(db: Db) {
         .then((rows) => rows[0] ?? null);
 
       if (!current) throw notFound("Issue not found");
+
+      // Fast-path: actor already owns the lock for this in_progress issue. Return
+      // immediately without re-running adoption helpers, so write paths (comments,
+      // patches, signoffs) don't 409 against themselves. Restored from master's
+      // PR #4258 — this block was dropped during the cli-180-sync merge
+      // resolution and broke 5 verify tests + 5 e2e signoff-policy tests.
+      if (
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        sameRunLock(current.checkoutRunId, actorRunId)
+      ) {
+        return { ...current, adoptedFromRunId: null as string | null };
+      }
 
       if (
         actorRunId &&
