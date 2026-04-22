@@ -2310,7 +2310,7 @@ export function issueService(db: Db) {
         (current.executionRunId == null || current.executionRunId === checkoutRunId) &&
         checkoutRunId
       ) {
-        const adopted = await adoptUnclaimedCheckoutRun({
+        const adopted = await adoptUnownedCheckoutRun({
           issueId: id,
           actorAgentId: agentId,
           actorRunId: checkoutRunId,
