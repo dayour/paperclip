@@ -4,13 +4,12 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 import {
   activityLog,
-  agentWakeupRequests,
-  heartbeatRuns,
   agents,
   companies,
   createDb,
   executionWorkspaces,
   goals,
+  heartbeatRuns,
   instanceSettings,
   issueComments,
   issueInboxArchives,
@@ -1882,29 +1881,24 @@ describeEmbeddedPostgres("issueService.findMentionedProjectIds", () => {
   });
 });
 
-// CLI-126 — stale execution run auto-drain regression tests
-// These cover both the checkout path (CLI-104 regression guard) and the assertCheckoutOwner path
-// (comment POST / PATCH write paths), using embedded Postgres for full DB fidelity.
-describeEmbeddedPostgres("issueService stale execution run drain (CLI-126)", () => {
+describeEmbeddedPostgres("issueService.clearExecutionRunIfTerminal", () => {
   let db!: ReturnType<typeof createDb>;
   let svc!: ReturnType<typeof issueService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-cli-126-");
+    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issues-execution-lock-");
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
-    await ensureIssueRelationsTable(db);
-  }, 30_000);
+  }, 20_000);
 
   afterEach(async () => {
     await db.delete(issueComments);
     await db.delete(issueRelations);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
-    await db.delete(agentWakeupRequests);
-    await db.delete(heartbeatRuns);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -1918,21 +1912,22 @@ describeEmbeddedPostgres("issueService stale execution run drain (CLI-126)", () 
     await tempDb?.cleanup();
   });
 
-  async function seedBaseFixture() {
+  async function seedIssueWithRun(status: string | null) {
     const companyId = randomUUID();
     const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = status ? randomUUID() : null;
 
     await db.insert(companies).values({
       id: companyId,
       name: "Paperclip",
-      issuePrefix: `CLI${companyId.replace(/-/g, "").slice(0, 4).toUpperCase()}`,
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-
     await db.insert(agents).values({
       id: agentId,
       companyId,
-      name: "ClippyEng",
+      name: "CodexCoder",
       role: "engineer",
       status: "active",
       adapterType: "codex_local",
@@ -1940,202 +1935,80 @@ describeEmbeddedPostgres("issueService stale execution run drain (CLI-126)", () 
       runtimeConfig: {},
       permissions: {},
     });
-
-    return { companyId, agentId };
-  }
-
-  async function seedIssueWithStaleExecRun(
-    companyId: string,
-    agentId: string,
-    runStatus: string,
-  ) {
-    const runId = randomUUID();
-    const issueId = randomUUID();
-
-    await db.insert(heartbeatRuns).values({
-      id: runId,
-      companyId,
-      agentId,
-      status: runStatus,
-      invocationSource: "on_demand",
-    });
-
+    if (runId) {
+      await db.insert(heartbeatRuns).values({
+        id: runId,
+        companyId,
+        agentId,
+        status,
+        invocationSource: "manual",
+      });
+    }
     await db.insert(issues).values({
       id: issueId,
       companyId,
-      title: "Stale lock test issue",
+      title: "Execution lock",
       status: "in_progress",
       priority: "medium",
       assigneeAgentId: agentId,
-      checkoutRunId: runId,
       executionRunId: runId,
-      executionAgentNameKey: "clippyeng",
-      executionLockedAt: new Date(),
+      executionAgentNameKey: runId ? "codexcoder" : null,
+      executionLockedAt: runId ? new Date() : null,
     });
 
     return { issueId, runId };
   }
 
-  // ── checkout path (CLI-104 regression guard) ────────────────────────────
+  it("clears execution locks owned by terminal runs", async () => {
+    const { issueId } = await seedIssueWithRun("failed");
 
-  it("checkout: clears stale terminal execution run and lets checkout proceed", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId, runId } = await seedIssueWithStaleExecRun(companyId, agentId, "timed_out");
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(true);
 
-    const freshRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: freshRunId,
-      companyId,
-      agentId,
-      status: "running",
-      invocationSource: "on_demand",
+    const row = await db
+      .select({
+        executionRunId: issues.executionRunId,
+        executionAgentNameKey: issues.executionAgentNameKey,
+        executionLockedAt: issues.executionLockedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({
+      executionRunId: null,
+      executionAgentNameKey: null,
+      executionLockedAt: null,
     });
-
-    // Checkout with a new runId — stale lock should be drained automatically.
-    const updated = await svc.checkout(issueId, agentId, ["in_progress"], freshRunId);
-    expect(updated.executionRunId).toBe(freshRunId);
-    expect(updated.checkoutRunId).toBe(freshRunId);
-
-    // Activity log must record the drain.
-    const drainLogs = await db
-      .select({ action: activityLog.action, entityId: activityLog.entityId })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(1);
-    expect(drainLogs[0]!.entityId).toBe(issueId);
   });
 
-  it("checkout: clears stale cancelled execution run and lets checkout proceed", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId } = await seedIssueWithStaleExecRun(companyId, agentId, "cancelled");
+  it("does not clear execution locks owned by live runs", async () => {
+    const { issueId, runId } = await seedIssueWithRun("running");
 
-    const freshRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: freshRunId,
-      companyId,
-      agentId,
-      status: "running",
-      invocationSource: "on_demand",
-    });
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(false);
 
-    const updated = await svc.checkout(issueId, agentId, ["in_progress"], freshRunId);
-    expect(updated.executionRunId).toBe(freshRunId);
-
-    const drainLogs = await db
-      .select({ action: activityLog.action })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(1);
+    const row = await db
+      .select({
+        executionRunId: issues.executionRunId,
+        executionAgentNameKey: issues.executionAgentNameKey,
+        executionLockedAt: issues.executionLockedAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row?.executionRunId).toBe(runId);
+    expect(row?.executionAgentNameKey).toBe("codexcoder");
+    expect(row?.executionLockedAt).toBeInstanceOf(Date);
   });
 
-  it("checkout: preserves active (running) execution run — no drain", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId, runId } = await seedIssueWithStaleExecRun(companyId, agentId, "running");
+  it("does not update issues without an execution lock", async () => {
+    const { issueId } = await seedIssueWithRun(null);
 
-    // Checkout with the same runId — same-run lock should pass through.
-    const updated = await svc.checkout(issueId, agentId, ["in_progress"], runId);
-    expect(updated.executionRunId).toBe(runId);
+    await expect(svc.clearExecutionRunIfTerminal(issueId)).resolves.toBe(false);
 
-    const drainLogs = await db
-      .select({ action: activityLog.action })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(0);
-  });
-
-  // ── assertCheckoutOwner path (comment POST / PATCH, CLI-126) ────────────
-
-  it("assertCheckoutOwner: drains stale terminal execution run and passes ownership check", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId, runId } = await seedIssueWithStaleExecRun(companyId, agentId, "timed_out");
-
-    const freshRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: freshRunId,
-      companyId,
-      agentId,
-      status: "running",
-      invocationSource: "on_demand",
-    });
-
-    // Update issue to use freshRunId as checkoutRunId but keep stale executionRunId.
-    await db.update(issues).set({ checkoutRunId: freshRunId }).where(eq(issues.id, issueId));
-
-    // Must not throw a 409 — the stale execution run should be drained automatically.
-    const ownership = await svc.assertCheckoutOwner(issueId, agentId, freshRunId);
-    expect(ownership.id).toBe(issueId);
-    expect(ownership.adoptedFromRunId).toBeNull();
-
-    // Execution run must be cleared.
-    const [row] = await db.select({ executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, issueId));
-    expect(row!.executionRunId).toBeNull();
-
-    // Drain activity must be logged.
-    const drainLogs = await db
-      .select({ action: activityLog.action, entityId: activityLog.entityId })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(1);
-    expect(drainLogs[0]!.entityId).toBe(issueId);
-  });
-
-  it("assertCheckoutOwner: drains stale cancelled execution run — cancels linked wakeup requests", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId, runId } = await seedIssueWithStaleExecRun(companyId, agentId, "cancelled");
-
-    const freshRunId = randomUUID();
-    await db.insert(heartbeatRuns).values({
-      id: freshRunId,
-      companyId,
-      agentId,
-      status: "running",
-      invocationSource: "on_demand",
-    });
-
-    // Seed a deferred wakeup request linked to this issue.
-    const wakeupId = randomUUID();
-    await db.insert(agentWakeupRequests).values({
-      id: wakeupId,
-      companyId,
-      agentId,
-      source: "issue_execution",
-      status: "deferred_issue_execution",
-      payload: { issueId },
-    });
-
-    await db.update(issues).set({ checkoutRunId: freshRunId }).where(eq(issues.id, issueId));
-
-    await svc.assertCheckoutOwner(issueId, agentId, freshRunId);
-
-    // Linked wakeup request must be cancelled.
-    const [wakeup] = await db
-      .select({ status: agentWakeupRequests.status })
-      .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.id, wakeupId));
-    expect(wakeup!.status).toBe("cancelled");
-
-    const drainLogs = await db
-      .select({ action: activityLog.action })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(1);
-  });
-
-  it("assertCheckoutOwner: preserves active (running) execution run — no drain, no 409", async () => {
-    const { companyId, agentId } = await seedBaseFixture();
-    const { issueId, runId } = await seedIssueWithStaleExecRun(companyId, agentId, "running");
-
-    // Same-run checkout — execution run IS active and belongs to the same run.
-    const ownership = await svc.assertCheckoutOwner(issueId, agentId, runId);
-    expect(ownership.id).toBe(issueId);
-
-    const [row] = await db.select({ executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, issueId));
-    expect(row!.executionRunId).toBe(runId);
-
-    const drainLogs = await db
-      .select({ action: activityLog.action })
-      .from(activityLog)
-      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
-    expect(drainLogs).toHaveLength(0);
+    const row = await db
+      .select({ executionRunId: issues.executionRunId, executionLockedAt: issues.executionLockedAt })
+      .from(issues)
+      .where(eq(issues.id, issueId))
+      .then((rows) => rows[0]);
+    expect(row).toEqual({ executionRunId: null, executionLockedAt: null });
   });
 });

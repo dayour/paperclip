@@ -3,7 +3,6 @@ import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
-  agentWakeupRequests,
   agents,
   assets,
   companies,
@@ -34,7 +33,6 @@ import {
   parseProjectExecutionWorkspacePolicy,
 } from "./execution-workspace-policy.js";
 import { instanceSettingsService } from "./instance-settings.js";
-import { logActivity } from "./activity-log.js";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { resolveIssueGoalId, resolveNextIssueGoalId } from "./issue-goal-fallback.js";
 import { getDefaultCompanyGoal } from "./goals.js";
@@ -130,11 +128,6 @@ type IssueUserContextInput = {
 };
 type ProjectGoalReader = Pick<Db, "select">;
 type DbReader = Pick<Db, "select">;
-// CLI-165: shared alias used by helpers that accept either the root db or a transaction from
-// db.transaction(). Using `Db | Tx` preserves Drizzle's query-builder types at both call sites
-// (inline root query and inside a transaction), which is especially important for the drain
-// chokepoint where losing type safety could mask a wrong-table reference.
-type DbOrTx = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId"> & {
   labelIds?: string[];
   blockedByIssueIds?: string[];
@@ -614,7 +607,7 @@ function latestIssueActivityAt(...values: Array<Date | string | null | undefined
   return normalized[0] ?? null;
 }
 
-async function labelMapForIssues(dbOrTx: DbOrTx, issueIds: string[]): Promise<Map<string, IssueLabelRow[]>> {
+async function labelMapForIssues(dbOrTx: any, issueIds: string[]): Promise<Map<string, IssueLabelRow[]>> {
   const map = new Map<string, IssueLabelRow[]>();
   if (issueIds.length === 0) return map;
   for (const issueIdChunk of chunkList(issueIds, ISSUE_LIST_RELATED_QUERY_CHUNK_SIZE)) {
@@ -637,7 +630,7 @@ async function labelMapForIssues(dbOrTx: DbOrTx, issueIds: string[]): Promise<Ma
   return map;
 }
 
-async function withIssueLabels(dbOrTx: DbOrTx, rows: IssueRow[]): Promise<IssueWithLabels[]> {
+async function withIssueLabels(dbOrTx: any, rows: IssueRow[]): Promise<IssueWithLabels[]> {
   if (rows.length === 0) return [];
   const labelsByIssueId = await labelMapForIssues(dbOrTx, rows.map((row) => row.id));
   return rows.map((row) => {
@@ -653,7 +646,7 @@ async function withIssueLabels(dbOrTx: DbOrTx, rows: IssueRow[]): Promise<IssueW
 const ACTIVE_RUN_STATUSES = ["queued", "running"];
 
 async function activeRunMapForIssues(
-  dbOrTx: DbOrTx,
+  dbOrTx: any,
   issueRows: IssueWithLabels[],
 ): Promise<Map<string, IssueActiveRunRow>> {
   const map = new Map<string, IssueActiveRunRow>();
@@ -752,7 +745,7 @@ function withActiveRuns(
 }
 
 async function userCommentStatsForIssues(
-  dbOrTx: DbOrTx,
+  dbOrTx: any,
   companyId: string,
   userId: string,
   issueIds: string[],
@@ -788,7 +781,7 @@ async function userCommentStatsForIssues(
 }
 
 async function userReadStatsForIssues(
-  dbOrTx: DbOrTx,
+  dbOrTx: any,
   companyId: string,
   userId: string,
   issueIds: string[],
@@ -814,7 +807,7 @@ async function userReadStatsForIssues(
 }
 
 async function lastActivityStatsForIssues(
-  dbOrTx: DbOrTx,
+  dbOrTx: any,
   companyId: string,
   issueIds: string[],
 ): Promise<IssueLastActivityStat[]> {
@@ -993,7 +986,7 @@ export function issueService(db: Db) {
     }
   }
 
-  async function assertValidLabelIds(companyId: string, labelIds: string[], dbOrTx: DbOrTx = db) {
+  async function assertValidLabelIds(companyId: string, labelIds: string[], dbOrTx: any = db) {
     if (labelIds.length === 0) return;
     const existing = await dbOrTx
       .select({ id: labels.id })
@@ -1008,7 +1001,7 @@ export function issueService(db: Db) {
     issueId: string,
     companyId: string,
     labelIds: string[],
-    dbOrTx: DbOrTx = db,
+    dbOrTx: any = db,
   ) {
     const deduped = [...new Set(labelIds)];
     await assertValidLabelIds(companyId, deduped, dbOrTx);
@@ -1152,7 +1145,7 @@ export function issueService(db: Db) {
     companyId: string,
     blockedByIssueIds: string[],
     actor: { agentId?: string | null; userId?: string | null } = {},
-    dbOrTx: DbOrTx = db,
+    dbOrTx: any = db,
   ) {
     const deduped = [...new Set(blockedByIssueIds)];
     if (deduped.some((candidate) => candidate === issueId)) {
@@ -1194,7 +1187,7 @@ export function issueService(db: Db) {
         companyId,
         issueId: blockerIssueId,
         relatedIssueId: issueId,
-        type: "blocks" as const,
+        type: "blocks",
         createdByAgentId: actor.agentId ?? null,
         createdByUserId: actor.userId ?? null,
       })),
@@ -1209,77 +1202,6 @@ export function issueService(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!run) return true;
     return TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status);
-  }
-
-  // CLI-126: shared pre-check that drains a stale execution run before write-path ownership assertion.
-  // Runs in its own SELECT FOR UPDATE transaction to be atomic. Returns drain metadata if a drain
-  // occurred (null if executionRunId was absent or the run is still active). Callers must log the
-  // `issue.execution_run_auto_drained` activity AFTER this transaction commits.
-  async function drainStaleExecutionRunIfNeeded(issueId: string): Promise<{
-    drainedRunId: string;
-    companyId: string;
-    drainedAgentNameKey: string | null;
-  } | null> {
-    let drained: { drainedRunId: string; companyId: string; drainedAgentNameKey: string | null } | null = null;
-
-    await db.transaction(async (tx) => {
-      await tx.execute(sql`SELECT id FROM issues WHERE id = ${issueId} FOR UPDATE`);
-
-      const row = await tx
-        .select({
-          companyId: issues.companyId,
-          executionRunId: issues.executionRunId,
-          executionAgentNameKey: issues.executionAgentNameKey,
-        })
-        .from(issues)
-        .where(eq(issues.id, issueId))
-        .then((rows) => rows[0] ?? null);
-
-      if (!row?.executionRunId) return;
-
-      const lockRun = await tx
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.id, row.executionRunId))
-        .then((rows) => rows[0] ?? null);
-
-      // Active execution run — do not drain. A queued run is live: it is waiting
-      // for an executor slot and will transition to "running" once an agent picks it
-      // up. Clearing it would falsely orphan a legitimate handoff window. Queued runs
-      // that truly stall (agent crashes before acquisition, scheduler bug) are caught
-      // by reapOrphanedRuns in heartbeat.ts. A time-gated write-path drain
-      // (STALE_QUEUED_LOCK_WINDOW_MS, ~15 min) would short-circuit that reconciler lag
-      // and is a viable future extension, but is out of scope for CLI-126. — CLI-104/CLI-126
-      if (lockRun && (lockRun.status === "queued" || lockRun.status === "running")) return;
-
-      const now = new Date();
-
-      await tx
-        .update(issues)
-        .set({ executionRunId: null, executionAgentNameKey: null, executionLockedAt: null, updatedAt: now })
-        .where(and(eq(issues.id, issueId), eq(issues.executionRunId, row.executionRunId)));
-
-      // Cancel any deferred wakeup requests linked to this issue so they do not re-lock it.
-      await tx
-        .update(agentWakeupRequests)
-        .set({
-          status: "cancelled",
-          finishedAt: now,
-          error: "Execution run drain: linked run is no longer active",
-          updatedAt: now,
-        })
-        .where(
-          and(
-            eq(agentWakeupRequests.companyId, row.companyId),
-            eq(agentWakeupRequests.status, "deferred_issue_execution"),
-            sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
-          ),
-        );
-
-      drained = { drainedRunId: row.executionRunId, companyId: row.companyId, drainedAgentNameKey: row.executionAgentNameKey };
-    });
-
-    return drained;
   }
 
   async function adoptStaleCheckoutRun(input: {
@@ -1320,7 +1242,87 @@ export function issueService(db: Db) {
     return adopted;
   }
 
+  async function adoptUnownedCheckoutRun(input: {
+    issueId: string;
+    actorAgentId: string;
+    actorRunId: string;
+  }) {
+    const now = new Date();
+    const adopted = await db
+      .update(issues)
+      .set({
+        checkoutRunId: input.actorRunId,
+        executionRunId: input.actorRunId,
+        executionLockedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(issues.id, input.issueId),
+          eq(issues.status, "in_progress"),
+          eq(issues.assigneeAgentId, input.actorAgentId),
+          isNull(issues.checkoutRunId),
+          or(isNull(issues.executionRunId), eq(issues.executionRunId, input.actorRunId)),
+        ),
+      )
+      .returning({
+        id: issues.id,
+        status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        checkoutRunId: issues.checkoutRunId,
+        executionRunId: issues.executionRunId,
+      })
+      .then((rows) => rows[0] ?? null);
+
+    return adopted;
+  }
+
+  async function clearExecutionRunIfTerminal(issueId: string): Promise<boolean> {
+    return db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select ${issues.id} from ${issues} where ${issues.id} = ${issueId} for update`,
+      );
+      const issue = await tx
+        .select({ executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      if (!issue?.executionRunId) return false;
+
+      await tx.execute(
+        sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${issue.executionRunId} for update`,
+      );
+      const run = await tx
+        .select({ status: heartbeatRuns.status })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, issue.executionRunId))
+        .then((rows) => rows[0] ?? null);
+      if (run && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+
+      const updated = await tx
+        .update(issues)
+        .set({
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(issues.id, issueId),
+            eq(issues.executionRunId, issue.executionRunId),
+          ),
+        )
+        .returning({ id: issues.id })
+        .then((rows) => rows[0] ?? null);
+
+      return Boolean(updated);
+    });
+  }
+
   return {
+    clearExecutionRunIfTerminal,
+
     list: async (companyId: string, filters?: IssueFilters) => {
       const conditions = [eq(issues.companyId, companyId)];
       const limit = typeof filters?.limit === "number" && Number.isFinite(filters.limit)
@@ -1609,7 +1611,7 @@ export function issueService(db: Db) {
       return relations.get(issueId) ?? { blockedBy: [], blocks: [] };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: DbOrTx = db) => {
+    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
       const issue = await dbOrTx
         .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
@@ -1620,7 +1622,7 @@ export function issueService(db: Db) {
       return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
     },
 
-    listDependencyReadiness: async (companyId: string, issueIds: string[], dbOrTx: DbOrTx = db) => {
+    listDependencyReadiness: async (companyId: string, issueIds: string[], dbOrTx: any = db) => {
       return listIssueDependencyReadinessMap(dbOrTx, companyId, issueIds);
     },
 
@@ -2001,7 +2003,7 @@ export function issueService(db: Db) {
         actorAgentId?: string | null;
         actorUserId?: string | null;
       },
-      dbOrTx: DbOrTx = db,
+      dbOrTx: any = db,
     ) => {
       const existing = await dbOrTx
         .select()
@@ -2190,23 +2192,7 @@ export function issueService(db: Db) {
 
       const now = new Date();
 
-      // Use the shared stale-execution-run drain before applying the execution lock condition,
-      // so a dead lock can't produce a spurious 409. Wakeup cancellation and activity logging
-      // are included in the helper and its post-commit call below.
-      const checkoutDrained = await drainStaleExecutionRunIfNeeded(id);
-      if (checkoutDrained) {
-        await logActivity(db, {
-          companyId: checkoutDrained.companyId,
-          actorType: "agent",
-          actorId: agentId,
-          agentId,
-          runId: checkoutRunId,
-          action: "issue.execution_run_auto_drained",
-          entityType: "issue",
-          entityId: id,
-          details: { drainedRunId: checkoutDrained.drainedRunId, drainedAgentNameKey: checkoutDrained.drainedAgentNameKey },
-        });
-      }
+      await clearExecutionRunIfTerminal(id);
 
       const dependencyReadiness = await listIssueDependencyReadinessMap(db, issueCompany.companyId, [id]);
       const unresolvedBlockerIssueIds = dependencyReadiness.get(id)?.unresolvedBlockerIssueIds ?? [];
@@ -2335,29 +2321,14 @@ export function issueService(db: Db) {
     },
 
     assertCheckoutOwner: async (id: string, actorAgentId: string, actorRunId: string | null) => {
-      // CLI-126: drain any stale execution run before checking ownership so comment/PATCH
-      // write paths self-recover instead of emitting a spurious 409.
-      const ownerDrained = await drainStaleExecutionRunIfNeeded(id);
-      if (ownerDrained) {
-        await logActivity(db, {
-          companyId: ownerDrained.companyId,
-          actorType: "agent",
-          actorId: actorAgentId,
-          agentId: actorAgentId,
-          runId: actorRunId,
-          action: "issue.execution_run_auto_drained",
-          entityType: "issue",
-          entityId: id,
-          details: { drainedRunId: ownerDrained.drainedRunId, drainedAgentNameKey: ownerDrained.drainedAgentNameKey },
-        });
-      }
-
+      await clearExecutionRunIfTerminal(id);
       const current = await db
         .select({
           id: issues.id,
           status: issues.status,
           assigneeAgentId: issues.assigneeAgentId,
           checkoutRunId: issues.checkoutRunId,
+          executionRunId: issues.executionRunId,
         })
         .from(issues)
         .where(eq(issues.id, id))
@@ -2371,6 +2342,27 @@ export function issueService(db: Db) {
         sameRunLock(current.checkoutRunId, actorRunId)
       ) {
         return { ...current, adoptedFromRunId: null as string | null };
+      }
+
+      if (
+        actorRunId &&
+        current.status === "in_progress" &&
+        current.assigneeAgentId === actorAgentId &&
+        current.checkoutRunId == null &&
+        (current.executionRunId == null || current.executionRunId === actorRunId)
+      ) {
+        const adopted = await adoptUnownedCheckoutRun({
+          issueId: id,
+          actorAgentId,
+          actorRunId,
+        });
+
+        if (adopted) {
+          return {
+            ...adopted,
+            adoptedFromRunId: null as string | null,
+          };
+        }
       }
 
       if (
@@ -2400,12 +2392,14 @@ export function issueService(db: Db) {
         status: current.status,
         assigneeAgentId: current.assigneeAgentId,
         checkoutRunId: current.checkoutRunId,
+        executionRunId: current.executionRunId,
         actorAgentId,
         actorRunId,
       });
     },
 
     release: async (id: string, actorAgentId?: string, actorRunId?: string | null) => {
+      await clearExecutionRunIfTerminal(id);
       const existing = await db
         .select()
         .from(issues)
@@ -2423,12 +2417,15 @@ export function issueService(db: Db) {
         existing.checkoutRunId &&
         !sameRunLock(existing.checkoutRunId, actorRunId ?? null)
       ) {
-        throw conflict("Only checkout run can release issue", {
-          issueId: existing.id,
-          assigneeAgentId: existing.assigneeAgentId,
-          checkoutRunId: existing.checkoutRunId,
-          actorRunId: actorRunId ?? null,
-        });
+        const stale = await isTerminalOrMissingHeartbeatRun(existing.checkoutRunId);
+        if (!stale) {
+          throw conflict("Only checkout run can release issue", {
+            issueId: existing.id,
+            assigneeAgentId: existing.assigneeAgentId,
+            checkoutRunId: existing.checkoutRunId,
+            actorRunId: actorRunId ?? null,
+          });
+        }
       }
 
       const updated = await db
@@ -2437,6 +2434,9 @@ export function issueService(db: Db) {
           status: "todo",
           assigneeAgentId: null,
           checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
           updatedAt: new Date(),
         })
         .where(eq(issues.id, id))
@@ -2446,6 +2446,51 @@ export function issueService(db: Db) {
       const [enriched] = await withIssueLabels(db, [updated]);
       return enriched;
     },
+
+    adminForceRelease: async (id: string, options: { clearAssignee?: boolean } = {}) =>
+      db.transaction(async (tx) => {
+        await tx.execute(
+          sql`select ${issues.id} from ${issues} where ${issues.id} = ${id} for update`,
+        );
+        const existing = await tx
+          .select({
+            id: issues.id,
+            checkoutRunId: issues.checkoutRunId,
+            executionRunId: issues.executionRunId,
+          })
+          .from(issues)
+          .where(eq(issues.id, id))
+          .then((rows) => rows[0] ?? null);
+        if (!existing) return null;
+
+        const patch: Partial<typeof issues.$inferInsert> = {
+          checkoutRunId: null,
+          executionRunId: null,
+          executionAgentNameKey: null,
+          executionLockedAt: null,
+          updatedAt: new Date(),
+        };
+        if (options.clearAssignee) {
+          patch.assigneeAgentId = null;
+        }
+
+        const updated = await tx
+          .update(issues)
+          .set(patch)
+          .where(eq(issues.id, id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (!updated) return null;
+
+        const [enriched] = await withIssueLabels(tx, [updated]);
+        return {
+          issue: enriched,
+          previous: {
+            checkoutRunId: existing.checkoutRunId,
+            executionRunId: existing.executionRunId,
+          },
+        };
+      }),
 
     listLabels: (companyId: string) =>
       db.select().from(labels).where(eq(labels.companyId, companyId)).orderBy(asc(labels.name), asc(labels.id)),
