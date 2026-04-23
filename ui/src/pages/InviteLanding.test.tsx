@@ -60,6 +60,35 @@ vi.mock("@/context/CompanyContext", () => ({
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
+const localStorageEntries = new Map<string, string>();
+
+function ensureLocalStorageMock() {
+  if (
+    typeof window.localStorage?.getItem === "function"
+    && typeof window.localStorage?.setItem === "function"
+    && typeof window.localStorage?.removeItem === "function"
+    && typeof window.localStorage?.clear === "function"
+  ) {
+    return;
+  }
+
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => localStorageEntries.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        localStorageEntries.set(key, value);
+      },
+      removeItem: (key: string) => {
+        localStorageEntries.delete(key);
+      },
+      clear: () => {
+        localStorageEntries.clear();
+      },
+    },
+  });
+}
+
 async function flushReact() {
   await act(async () => {
     await Promise.resolve();
@@ -71,6 +100,7 @@ describe("InviteLandingPage", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    ensureLocalStorageMock();
     localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
