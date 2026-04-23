@@ -87,7 +87,7 @@ export function BridgeSessionBadge() {
 
       setTimeout(() => {
         denyCountRef.current -= 1;
-        setDenyCount((c) => c - 1);
+        setDenyCount((count) => Math.max(0, count - 1));
       }, 3_000);
     });
   }, [onDenyFlash]);
@@ -106,7 +106,7 @@ export function BridgeSessionBadge() {
 
   if (!enabled) return null;
 
-  const kind: Kind = denyCount > 0 && baseKind !== "idle" ? "deny-flash" : baseKind;
+  const kind: Kind = denyCount > 0 ? "deny-flash" : baseKind;
   const isIdle = kind === "idle";
 
   const capCount = session?.capabilityCount ?? 0;

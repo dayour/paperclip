@@ -367,6 +367,16 @@ describeWhenImplemented("BridgeSessionBadge — ADR-0005 §8 / CLI-142", () => {
       expect(getTestId("bridge-session-badge")?.getAttribute("data-state")).toBe("deny-flash");
     });
 
+    it("renders deny-flash even before session state arrives", () => {
+      render(<Badge />);
+
+      act(() => {
+        mockLiveEvents.emitDenyFlash(makeDenyFlash());
+      });
+
+      expect(getTestId("bridge-session-badge")?.getAttribute("data-state")).toBe("deny-flash");
+    });
+
     it("deny-flash lasts exactly 3000ms then returns to underlying state", () => {
       render(<Badge />);
       act(() => {

@@ -6,11 +6,11 @@ declare global {
 
 /**
  * Local feature-flag hook for small UI-only flags.
- * Falls back to enabled when no explicit flag source is present so local
- * development and tests can exercise the surface.
+ * Falls back to disabled when no explicit flag source is present so new
+ * surfaces ship dark unless explicitly enabled.
  */
 export function useFeatureFlag(key: string): boolean {
-  if (typeof window === "undefined") return true;
+  if (typeof window === "undefined") return false;
 
   const globalValue = window.__PAPERCLIP_FEATURE_FLAGS__?.[key];
   if (typeof globalValue === "boolean") return globalValue;
@@ -23,5 +23,5 @@ export function useFeatureFlag(key: string): boolean {
     // Ignore storage failures and use the default.
   }
 
-  return true;
+  return false;
 }
