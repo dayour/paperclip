@@ -4,7 +4,6 @@ import type { Db, Tx } from "@paperclipai/db";
 import {
   agentWakeupRequests,
   activityLog,
-  agentWakeupRequests,
   agents,
   assets,
   companies,
