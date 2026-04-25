@@ -64,13 +64,20 @@ export interface AdapterRuntimeServiceReport {
   healthStatus?: "unknown" | "healthy" | "unhealthy";
 }
 
+export type AdapterExecutionErrorFamily = "transient_upstream";
+
 export interface AdapterExecutionResult {
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
   errorMessage?: string | null;
   errorCode?: string | null;
+<<<<<<< HEAD
   adapterFailureReason?: string | null;
+=======
+  errorFamily?: AdapterExecutionErrorFamily | null;
+  retryNotBefore?: string | null;
+>>>>>>> origin/master
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
   /**
@@ -312,6 +319,13 @@ export interface ServerAdapterModule {
   supportsLocalAgentJwt?: boolean;
   models?: AdapterModel[];
   listModels?: () => Promise<AdapterModel[]>;
+  /**
+   * Optional explicit refresh hook for model discovery.
+   * Use this when the adapter caches discovered models and needs a bypass path
+   * so the UI can fetch newly released models without waiting for cache expiry
+   * or a Paperclip code update.
+   */
+  refreshModels?: () => Promise<AdapterModel[]>;
   agentConfigurationDoc?: string;
   /**
    * Optional lifecycle hook when an agent is approved/hired (join-request or hire_agent approval).
