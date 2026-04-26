@@ -24,8 +24,6 @@ type AuditOutcome = "applied" | "rejected_agent_actor";
 type AdminCircuitAction = "reset" | "override_pause";
 
 type ResetRequestShape = {
-  actor?: unknown;
-  actorKind?: unknown;
   reason?: unknown;
 };
 
@@ -91,12 +89,10 @@ async function findMatchingCircuitTargets(db: Db, routeKey: string): Promise<{
   };
 }
 
-function readResetRequest(body: unknown): { reason: string | null; actor: string | null; actorKind: string | null } {
+function readResetRequest(body: unknown): { reason: string | null } {
   const parsed = (body ?? {}) as ResetRequestShape;
   return {
     reason: readRequiredString(parsed.reason),
-    actor: readRequiredString(parsed.actor),
-    actorKind: readRequiredString(parsed.actorKind),
   };
 }
 
@@ -297,13 +293,9 @@ export function adminAdapterRoutes(db: Db) {
   });
 
   router.post("/:key/reset", async (req, res) => {
-    const { reason, actor, actorKind } = readResetRequest(req.body);
+    const { reason } = readResetRequest(req.body);
     if (!reason) {
       res.status(400).json({ error: "Request body must include a non-empty \"reason\" string." });
-      return;
-    }
-    if (!actor && !actorKind) {
-      res.status(400).json({ error: "Request body must include a non-empty \"actor\" string." });
       return;
     }
 
@@ -317,13 +309,9 @@ export function adapterQuarantineRoutes(db: Db) {
   const router = Router();
 
   router.post("/adapters/quarantine/:key/reset", async (req, res) => {
-    const { reason, actorKind } = readResetRequest(req.body);
+    const { reason } = readResetRequest(req.body);
     if (!reason) {
       res.status(400).json({ error: "Request body must include a non-empty \"reason\" string." });
-      return;
-    }
-    if (actorKind !== "user" && actorKind !== "agent") {
-      res.status(400).json({ error: "Request body must include actorKind: \"user\" | \"agent\"." });
       return;
     }
 

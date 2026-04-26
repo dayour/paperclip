@@ -1,6 +1,7 @@
-import { pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
+import { type AnyPgColumn, pgTable, uuid, text, timestamp, jsonb, integer, index } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
+import { issues } from "./issues.js";
 
 export const agentWakeupRequests = pgTable(
   "agent_wakeup_requests",
@@ -18,7 +19,7 @@ export const agentWakeupRequests = pgTable(
     requestedByActorId: text("requested_by_actor_id"),
     idempotencyKey: text("idempotency_key"),
     runId: uuid("run_id"),
-    issueId: uuid("issue_id"),
+    issueId: uuid("issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
     scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
