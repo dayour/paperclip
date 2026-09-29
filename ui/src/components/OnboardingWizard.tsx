@@ -1515,6 +1515,7 @@ function OnboardingWizardInner({
   const COMMAND_PLACEHOLDERS: Record<string, string> = {
     claude_local: "claude",
     codex_local: "codex",
+    copilot_local: "copilot",
     gemini_local: "gemini",
     kimi_local: "kimi",
     pi_local: "pi",

@@ -80,6 +80,12 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     icon: Code,
     recommended: true,
   },
+  copilot_local: {
+    label: "GitHub Copilot",
+    description: "Local GitHub Copilot SDK agent with subscription and BYOK models",
+    icon: Code,
+    recommended: true,
+  },
   paperclip_runner: {
     label: "Paperclip Runner",
     description: "Experimental Rust runner with a Codex provider",

@@ -37,6 +37,14 @@ describe("adapter metadata", () => {
     expect(isEnabledAdapterType("http")).toBe(false);
   });
 
+  it("offers the GitHub Copilot SDK adapter", () => {
+    expect(isEnabledAdapterType("copilot_local")).toBe(true);
+    expect(listAdapterOptions().find((option) => option.value === "copilot_local")).toMatchObject({
+      label: "GitHub Copilot (local)",
+      comingSoon: false,
+    });
+  });
+
   it("marks the retired ACPX adapter as unavailable for new selections", () => {
     expect(isEnabledAdapterType("acpx_local")).toBe(false);
     expect(isValidAdapterType("acpx_local")).toBe(false);

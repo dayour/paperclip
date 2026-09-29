@@ -1,7 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_ROLE_LABELS, acceptInviteSchema, createAgentSchema, updateAgentSchema } from "./index.js";
+import { AGENT_ADAPTER_TYPES, AGENT_ROLE_LABELS, acceptInviteSchema, createAgentSchema, updateAgentSchema } from "./index.js";
 
 describe("dynamic adapter type validation schemas", () => {
+  it("recognizes the Copilot SDK local adapter", () => {
+    expect(AGENT_ADAPTER_TYPES).toContain("copilot_local");
+    expect(
+      createAgentSchema.parse({
+        name: "Copilot Agent",
+        adapterType: "copilot_local",
+      }).adapterType,
+    ).toBe("copilot_local");
+  });
+
   it("accepts external adapter types in create/update agent schemas", () => {
     expect(
       createAgentSchema.parse({
