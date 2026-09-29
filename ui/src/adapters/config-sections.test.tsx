@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { TooltipProvider } from "../components/ui/tooltip";
 import type { AdapterConfigFieldsProps, AdapterConfigSection } from "./types";
 import { CodexLocalConfigFields } from "./codex-local/config-fields";
+import { CopilotLocalConfigFields } from "./copilot-local/config-fields";
 import { ClaudeLocalAdvancedFields } from "./claude-local/config-fields";
 import { GeminiLocalConfigFields } from "./gemini-local/config-fields";
 import { ProcessConfigFields } from "./process/config-fields";
@@ -15,6 +16,7 @@ function renderSection(
   adapterType: string,
   section: AdapterConfigSection,
   config: Record<string, unknown> = {},
+  extra: Partial<AdapterConfigFieldsProps> = {},
 ) {
   return renderToStaticMarkup(
     <TooltipProvider>
@@ -30,12 +32,33 @@ function renderSection(
         mark={() => {}}
         models={[]}
         hideInstructionsFile
+        {...extra}
       />
     </TooltipProvider>,
   );
 }
 
 describe("adapter configuration sections", () => {
+  it("keeps Copilot execution and session controls in their own sections", () => {
+    const config = { transport: "cli", isolateSession: true };
+    const advanced = renderSection(CopilotLocalConfigFields, "copilot_local", "advanced", config);
+    expect(advanced).toContain("Copilot CLI (legacy)");
+    expect(advanced).not.toContain("New session every run");
+    const configuration = renderSection(CopilotLocalConfigFields, "copilot_local", "configuration", config);
+    expect(configuration).toContain("Approve tool permissions automatically");
+    expect(configuration).not.toContain("Execution");
+    const policy = renderSection(CopilotLocalConfigFields, "copilot_local", "runPolicy", config);
+    expect(policy).toContain("New session every run");
+    expect(policy).not.toContain("Copilot CLI");
+    expect(renderSection(CopilotLocalConfigFields, "copilot_local", "advanced", config, {
+      managedSandboxOnly: true,
+    })).toBe("");
+    expect(renderSection(CopilotLocalConfigFields, "copilot_local", "configuration", config, {
+      managedSandboxOnly: true,
+      hideInstructionsFile: false,
+    })).not.toContain("Agent instructions file");
+  });
+
   it("separates provider selection from lifecycle and hides fixed Codex permissions", () => {
     const config = {
       provider: "codex",

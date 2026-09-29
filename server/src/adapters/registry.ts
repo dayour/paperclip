@@ -41,6 +41,7 @@ import {
   agentConfigurationDoc as codexAgentConfigurationDoc,
   models as codexModels,
 } from "@paperclipai/adapter-codex-local";
+import { createServerAdapter as createCopilotLocalAdapter } from "@paperclipai/adapter-copilot-local/plugin";
 import {
   execute as cursorExecute,
   listCursorSkills,
@@ -356,6 +357,8 @@ const codexLocalAdapter: ServerAdapterModule = {
   getQuotaWindows: codexGetQuotaWindows,
   loginCapability: codexLoginCapability,
 };
+
+const copilotLocalAdapter: ServerAdapterModule = createCopilotLocalAdapter();
 
 const paperclipRunnerAdapter: ServerAdapterModule = {
   type: "paperclip_runner",
@@ -869,6 +872,7 @@ function registerBuiltInAdapters() {
     acpxLocalAdapter,
     claudeLocalAdapter,
     codexLocalAdapter,
+    copilotLocalAdapter,
     paperclipRunnerAdapter,
     openCodeLocalAdapter,
     piLocalAdapter,

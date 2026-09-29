@@ -2,7 +2,7 @@
 
 import { readdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -39,7 +39,7 @@ function discoverPublicPackages() {
     for (const entry of readdirSync(absDir, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       if (entry.name === "node_modules" || entry.name === "dist" || entry.name === ".git") continue;
-      walk(join(relDir, entry.name));
+      walk(posix.join(relDir, entry.name));
     }
   }
 

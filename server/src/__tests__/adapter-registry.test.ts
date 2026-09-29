@@ -40,6 +40,17 @@ const externalAdapter: ServerAdapterModule = {
 };
 
 describe("server adapter registry", () => {
+  it("registers Copilot as a resumable SDK adapter with dynamic models", () => {
+    expect(findServerAdapter("copilot_local")).toMatchObject({
+      type: "copilot_local",
+      models: [],
+      sessionManagement: { supportsSessionResume: true },
+      supportsInstructionsBundle: true,
+      runtimeToolDelivery: "invocation_context",
+    });
+    expect(findServerAdapter("copilot_local")?.listModels).toBeTypeOf("function");
+  });
+
   beforeEach(() => {
     unregisterServerAdapter("external_test");
     unregisterServerAdapter("hermes_local");

@@ -204,6 +204,14 @@ const ISSUE_THINKING_EFFORT_OPTIONS = {
     { value: "medium", label: "Medium" },
     { value: "high", label: "High" },
   ],
+  copilot_local: [
+    { value: "", label: "Default" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "X-High" },
+    { value: "max", label: "Max" },
+  ],
   opencode_local: [
     { value: "", label: "Default" },
     { value: "minimal", label: "Minimal" },
@@ -1215,6 +1223,8 @@ export function NewIssueDialog() {
   const assigneeOptionsTitle =
     assigneeAdapterType === "claude_local"
       ? "Claude options"
+      : assigneeAdapterType === "copilot_local"
+        ? "Copilot options"
       : assigneeAdapterType === "codex_local"
         ? "Codex options"
         : assigneeAdapterType === "opencode_local"
@@ -1223,6 +1233,8 @@ export function NewIssueDialog() {
   const thinkingEffortOptions =
     assigneeAdapterType === "codex_local"
       ? codexReasoningEffortOptions(effectiveAssigneeModel)
+      : assigneeAdapterType === "copilot_local"
+        ? ISSUE_THINKING_EFFORT_OPTIONS.copilot_local
       : assigneeAdapterType === "opencode_local"
         ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
       : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;

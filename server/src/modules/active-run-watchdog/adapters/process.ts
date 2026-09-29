@@ -6,6 +6,7 @@ import type { RunProcessCleanupOutcome, RunProcessMetadata } from "../applicatio
 const SESSIONED_LOCAL_ADAPTERS = new Set([
   "claude_local",
   "codex_local",
+  "copilot_local",
   "cursor",
   "gemini_local",
   "hermes_local",

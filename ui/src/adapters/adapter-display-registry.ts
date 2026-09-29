@@ -81,7 +81,7 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     recommended: true,
   },
   copilot_local: {
-    label: "GitHub Copilot",
+    label: "GitHub Copilot (local)",
     description: "Local GitHub Copilot SDK agent with subscription and BYOK models",
     icon: Code,
     recommended: true,

@@ -81,6 +81,28 @@ describe("buildAssigneeAdapterOverrides", () => {
     ).toEqual({
       adapterConfig: { variant: "max" },
     });
+    expect(
+      buildAssigneeAdapterOverrides({
+        adapterType: "copilot_local",
+        lane: "custom",
+        modelOverride: "account-model",
+        thinkingEffortOverride: "xhigh",
+        chrome: false,
+      }),
+    ).toEqual({
+      adapterConfig: { model: "account-model", effort: "xhigh" },
+    });
+    expect(
+      buildAssigneeAdapterOverrides({
+        adapterType: "copilot_local",
+        lane: "custom",
+        modelOverride: "account-model",
+        thinkingEffortOverride: "max",
+        chrome: false,
+      }),
+    ).toEqual({
+      adapterConfig: { model: "account-model", effort: "max" },
+    });
   });
 
   it("persists an exact GPT-6 Astra task override", () => {

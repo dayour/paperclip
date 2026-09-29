@@ -173,7 +173,7 @@ const emptyOverlay: AgentConfigOverlay = {
 const EMPTY_ENV: Record<string, EnvBinding> = {};
 
 export function supportsAdapterModelRefresh(adapterType: string): boolean {
-  return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "paperclip_runner" || adapterType === "opencode_local";
+  return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "copilot_local" || adapterType === "paperclip_runner" || adapterType === "opencode_local";
 }
 
 export function resolvePaperclipRunnerTransitionModel(
@@ -293,6 +293,11 @@ const claudeThinkingEffortOptions = [
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
+] as const;
+const copilotThinkingEffortOptions = [
+  ...claudeThinkingEffortOptions,
+  { id: "xhigh", label: "X-High" },
+  { id: "max", label: "Max" },
 ] as const;
 
 // Kimi exposes low/high/max (no "medium") via each model's support_efforts;
@@ -1291,7 +1296,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     id,
                     label: id === "xhigh" ? "X-High" : id[0].toUpperCase() + id.slice(1),
                   }))]
-                : claudeThinkingEffortOptions;
+                : adapterType === "copilot_local" ? copilotThinkingEffortOptions : claudeThinkingEffortOptions;
   const currentThinkingEffort = isCreate
     ? val!.thinkingEffort
     : adapterType === "codex_local"
