@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { models as codexFallbackModels } from "@paperclipai/adapter-codex-local";
+import { models as copilotStaticModels } from "@paperclipai/adapter-copilot-local";
 import { models as cursorFallbackModels } from "@paperclipai/adapter-cursor-local";
 import { models as opencodeFallbackModels } from "@paperclipai/adapter-opencode-local";
 import { resetOpenCodeModelsCacheForTests } from "@paperclipai/adapter-opencode-local/server";
-import { listAdapterModels, refreshAdapterModels } from "../adapters/index.js";
+import { findServerAdapter, listAdapterModels, refreshAdapterModels } from "../adapters/index.js";
 import { resetCodexModelsCacheForTests } from "../adapters/codex-models.js";
 import { resetCursorModelsCacheForTests, setCursorModelsRunnerForTests } from "../adapters/cursor-models.js";
 
@@ -21,6 +22,26 @@ describe("adapter model listing", () => {
   it("returns an empty list for unknown adapters", async () => {
     const models = await listAdapterModels("unknown_adapter");
     expect(models).toEqual([]);
+  });
+
+  it("returns all SDK-discovered Copilot models without a static catalog", async () => {
+    const adapter = findServerAdapter("copilot_local");
+    if (!adapter?.listModels) throw new Error("Copilot model discovery is not registered");
+    const discovered = Array.from({ length: 24 }, (_, index) => ({
+      id: `account-model-${index + 1}`,
+      label: `Account Model ${index + 1}`,
+    }));
+    const listModels = vi.spyOn(adapter, "listModels").mockResolvedValue(discovered);
+
+    expect(copilotStaticModels).toEqual([]);
+    expect(await listAdapterModels("copilot_local")).toEqual(discovered);
+    expect(await refreshAdapterModels("copilot_local")).toEqual(discovered);
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    listModels.mockRejectedValueOnce(new Error("Copilot catalog unavailable"));
+    await expect(listAdapterModels("copilot_local")).rejects.toThrow(
+      "Copilot catalog unavailable",
+    );
   });
 
   it("returns codex fallback models when no OpenAI key is available", async () => {

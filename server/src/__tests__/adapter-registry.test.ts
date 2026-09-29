@@ -55,6 +55,18 @@ const externalAdapter: ServerAdapterModule = {
 };
 
 describe("server adapter registry", () => {
+  it("registers Copilot as a resumable built-in SDK adapter", () => {
+    const adapter = findServerAdapter("copilot_local");
+    expect(adapter).toMatchObject({
+      type: "copilot_local",
+      sessionManagement: { supportsSessionResume: true },
+      supportsInstructionsBundle: true,
+      supportsLocalAgentJwt: true,
+      models: [],
+    });
+    expect(adapter?.listModels).toBeTypeOf("function");
+  });
+
   beforeEach(() => {
     unregisterServerAdapter("external_test");
     unregisterServerAdapter("claude_local");

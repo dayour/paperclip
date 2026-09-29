@@ -330,7 +330,7 @@ export function OnboardingWizard() {
       args,
       url,
       dangerouslySkipPermissions:
-        adapterType === "claude_local" || adapterType === "opencode_local",
+        adapterType === "claude_local" || adapterType === "opencode_local" || adapterType === "copilot_local",
       dangerouslyBypassSandbox:
         adapterType === "codex_local"
           ? DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX
@@ -954,6 +954,13 @@ export function OnboardingWizard() {
                             )}
                           </PopoverContent>
                         </Popover>
+                        {adapterType === "copilot_local" && adapterModelsError && (
+                          <p className="mt-1 text-xs text-destructive">
+                            {adapterModelsError instanceof Error
+                              ? adapterModelsError.message
+                              : "Unable to discover Copilot models."}
+                          </p>
+                        )}
                       </div>
                     </div>
                   )}
@@ -966,8 +973,7 @@ export function OnboardingWizard() {
                             Adapter environment check
                           </p>
                           <p className="text-[11px] text-muted-foreground">
-                            Runs a live probe that asks the adapter CLI to
-                            respond with hello.
+                            Checks that the selected adapter can connect and run.
                           </p>
                         </div>
                         <Button

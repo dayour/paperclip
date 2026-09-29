@@ -93,7 +93,7 @@ type StagedIssueFile = {
   title?: string | null;
 };
 
-const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "opencode_local"]);
+const ISSUE_OVERRIDE_ADAPTER_TYPES = new Set(["claude_local", "codex_local", "copilot_local", "opencode_local"]);
 const STAGED_FILE_ACCEPT = "image/*,application/pdf,text/plain,text/markdown,application/json,text/csv,text/html,.md,.markdown";
 
 const ISSUE_THINKING_EFFORT_OPTIONS = {
@@ -110,6 +110,14 @@ const ISSUE_THINKING_EFFORT_OPTIONS = {
     { value: "medium", label: "Medium" },
     { value: "high", label: "High" },
     { value: "xhigh", label: "X-High" },
+  ],
+  copilot_local: [
+    { value: "", label: "Default" },
+    { value: "low", label: "Low" },
+    { value: "medium", label: "Medium" },
+    { value: "high", label: "High" },
+    { value: "xhigh", label: "X-High" },
+    { value: "max", label: "Max" },
   ],
   opencode_local: [
     { value: "", label: "Default" },
@@ -140,10 +148,8 @@ function buildAssigneeAdapterOverrides(input: {
       adapterConfig.modelReasoningEffort = input.thinkingEffortOverride;
     } else if (adapterType === "opencode_local") {
       adapterConfig.variant = input.thinkingEffortOverride;
-    } else if (adapterType === "claude_local") {
+    } else if (adapterType === "claude_local" || adapterType === "copilot_local") {
       adapterConfig.effort = input.thinkingEffortOverride;
-    } else if (adapterType === "opencode_local") {
-      adapterConfig.variant = input.thinkingEffortOverride;
     }
   }
   if (adapterType === "claude_local" && input.chrome) {
@@ -621,6 +627,8 @@ export function NewIssueDialog() {
     const validThinkingValues =
       assigneeAdapterType === "codex_local"
         ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
+        : assigneeAdapterType === "copilot_local"
+          ? ISSUE_THINKING_EFFORT_OPTIONS.copilot_local
         : assigneeAdapterType === "opencode_local"
           ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
           : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
@@ -845,12 +853,16 @@ export function NewIssueDialog() {
       ? "Claude options"
       : assigneeAdapterType === "codex_local"
         ? "Codex options"
+        : assigneeAdapterType === "copilot_local"
+          ? "Copilot options"
         : assigneeAdapterType === "opencode_local"
           ? "OpenCode options"
         : "Agent options";
   const thinkingEffortOptions =
     assigneeAdapterType === "codex_local"
       ? ISSUE_THINKING_EFFORT_OPTIONS.codex_local
+      : assigneeAdapterType === "copilot_local"
+        ? ISSUE_THINKING_EFFORT_OPTIONS.copilot_local
       : assigneeAdapterType === "opencode_local"
         ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
       : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;

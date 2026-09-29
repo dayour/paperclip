@@ -166,6 +166,11 @@ const claudeThinkingEffortOptions = [
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
 ] as const;
+const copilotThinkingEffortOptions = [
+  ...claudeThinkingEffortOptions,
+  { id: "xhigh", label: "X-High" },
+  { id: "max", label: "Max" },
+] as const;
 
 
 /* ---- Form ---- */
@@ -434,6 +439,8 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const thinkingEffortOptions =
     adapterType === "codex_local"
       ? codexThinkingEffortOptions
+      : adapterType === "copilot_local"
+        ? copilotThinkingEffortOptions
       : adapterType === "cursor"
         ? cursorModeOptions
         : adapterType === "opencode_local"

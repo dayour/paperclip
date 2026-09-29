@@ -64,6 +64,11 @@ const adapterDisplayMap: Record<string, AdapterDisplayInfo> = {
     icon: Code,
     recommended: true,
   },
+  copilot_local: {
+    label: "GitHub Copilot",
+    description: "Local Copilot SDK agent",
+    icon: Code,
+  },
   gemini_local: {
     label: "Gemini CLI",
     description: "Local Gemini agent",
