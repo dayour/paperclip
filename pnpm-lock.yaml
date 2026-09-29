@@ -7,6 +7,12 @@ settings:
 overrides:
   '@agentclientprotocol/codex-acp@1.6.2>@openai/codex': 0.156.0
   '@agentclientprotocol/claude-agent-acp@0.73.0>@anthropic-ai/claude-agent-sdk': 0.3.280
+  '@microsoft/teams.api': 2.1.0
+  '@microsoft/teams.apps': 2.1.0
+  '@microsoft/teams.cards': 2.1.0
+  '@microsoft/teams.common': 2.1.0
+  '@microsoft/teams.graph': 2.1.0
+  '@microsoft/teams.graph-endpoints': 2.1.0
   rollup: '>=4.59.0'
   react: ^19.2.8
   react-dom: ^19.2.8
@@ -3209,29 +3215,29 @@ packages:
   '@mermaid-js/parser@1.2.1':
     resolution: {integrity: sha512-n12NohV3mrUyUL2o93IgG/ifeW9FTyeJn3zDxkhwa8MJ9Fxg3HQMlA3RiGmD/3UnJvheztkjjQAjA2T4LmUcpw==}
 
-  '@microsoft/teams.api@2.0.16':
-    resolution: {integrity: sha512-ds2SK6JvAcDL1EfVYWJ1Cmvyytm3CIfdPZS7CxYPvsebhfnMNmvxQlDFuh0Hh0hmjLxIJtycqBddMVulZITs1w==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.api@2.1.0':
+    resolution: {integrity: sha512-tS7NRqxpyzrgCwHCZh4xUys1Waon/cEtVb801Yx6DekOIOZaOgHA4KFuspM6FvlErzTt5tm6GGlXDstm4dkHbw==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.api/-/teams.api-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
-  '@microsoft/teams.apps@2.0.16':
-    resolution: {integrity: sha512-LwNy2MgP92ZZziGs/8f+17xttjgdzxgP2IYQCwNQ5ENoBFoQewRb53mARxeLEBhKtVfAtDG2yKHAqRuQvvltEg==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.apps@2.1.0':
+    resolution: {integrity: sha512-0nZDI4CGKQp5MnFPd+1wH+6PPdl/IEsg4likbXqDaoGiXCwJ8Y+5/4EeNPNR8q9wG2vbbX1Cyod7q7OOoY0kVQ==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.apps/-/teams.apps-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
-  '@microsoft/teams.cards@2.0.16':
-    resolution: {integrity: sha512-hOt+2m6oKI5LdASgsQmGB8yOMs/DTMlypgnQDf9dKWFlDiaZ6fkOy3zuNvVRdT3qZ70EOlq1MlhlT8AZxBbcRg==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.cards@2.1.0':
+    resolution: {integrity: sha512-Ok6WRhcfflCZmPqP5g3DtG5/MKPyXamll8gyuxGtNBhZLfitQtr0TAdcvXN8I4B6c7hoqSBDthvQ0aDReWTzXA==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.cards/-/teams.cards-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
-  '@microsoft/teams.common@2.0.16':
-    resolution: {integrity: sha512-Z/D0RLTNzkcgGNOdfCzq591UUgtuWIaSu6bbieDxIrLERcu6qI3O6EeeMQLCu/+xkxJrjPJny97CtQEhfLwY8Q==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.common@2.1.0':
+    resolution: {integrity: sha512-7UVRGEYQtNLLYkMwAxaA+0S4ckRxSiJ67U5vfqg3xQnKgY4Wop5ZtVj8zNxCLtoeAROamUToGJSstHsl8SZpUg==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.common/-/teams.common-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
-  '@microsoft/teams.graph-endpoints@2.0.16':
-    resolution: {integrity: sha512-yNqxdr/elYyzL0xcrGF5/muZniFLbel4QIQgGalwyropRzupasBuaWmIgFU4RVOG9i1dlvRAIq3sLj8E2OhVQQ==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.graph-endpoints@2.1.0':
+    resolution: {integrity: sha512-kB+/sBbkNzLCxt8elpZxAmnSB54BE8GtnLhU4FoIqwGjipEN1lAsXpqCzpkJkz5CK9XPGYo+h4k07mRWlooOuQ==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.graph-endpoints/-/teams.graph-endpoints-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
-  '@microsoft/teams.graph@2.0.16':
-    resolution: {integrity: sha512-tEdVCj76gEdgvxoYkBH3li+mr8Tfe94pp1cSOUMQNwOnsuKYvretKMZfAnt9adJCgGzGH2MYZeDDtgwmOBufGQ==}
-    engines: {node: '>=20'}
+  '@microsoft/teams.graph@2.1.0':
+    resolution: {integrity: sha512-/us8P/lyYTRu6TF98LiUoSggheyxWRCOe9oVcM1rQprA9TBbjB4LTwYNeBNw20ixu3BUQuD0ZYMSM1QdhUBXhQ==, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/@microsoft/teams.graph/-/teams.graph-2.1.0.tgz}
+    engines: {node: '>=22.12.0'}
 
   '@modelcontextprotocol/sdk@1.30.0':
     resolution: {integrity: sha512-xKd8OIzlqNzcqcNumGAa6g+PW2kjD5vrpcKOnfldAUPP3j7lnqMPwlTXQm8gF+UwH72z0lqaRbjr9hqGz0eITA==}
@@ -7112,9 +7118,6 @@ packages:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
 
-  jose@4.15.9:
-    resolution: {integrity: sha512-1vUQX+IdDMVPj4k8kOxgUqlcK518yluMuGZwqlr44FS1ppZB/5GWh4rZG89erpOBOJjU/OBsnCVFfapsRz6nEA==}
-
   jose@5.10.0:
     resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
@@ -7180,9 +7183,9 @@ packages:
   jwa@2.0.1:
     resolution: {integrity: sha512-hRF04fqJIP8Abbkq5NKGN0Bbr3JxlQ+qhZufXVr0DvujKy93ZCbXZMHDL4EOtodSbCWxOqR8MS1tXA5hwqCXDg==}
 
-  jwks-rsa@3.2.2:
-    resolution: {integrity: sha512-BqTyEDV+lS8F2trk3A+qJnxV5Q9EqKCBJOPti3W97r7qTympCZjb7h2X6f2kc+0K3rsSTY1/6YG2eaXKoj497w==}
-    engines: {node: '>=14'}
+  jwks-rsa@4.1.0:
+    resolution: {integrity: sha1-qqKzPCB0wT6nzD7cZMx3iB2FtoY=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/jwks-rsa/-/jwks-rsa-4.1.0.tgz}
+    engines: {node: ^20.19.0 || ^22.12.0 || >= 23.0.0}
 
   jws@4.0.1:
     resolution: {integrity: sha512-EKI/M/yqPncGUUh44xz0PxSidXFr/+r0pA70+gIYhjv+et7yxM+s29Y+VGDkovRofQem0fs7Uvf4+YmAdyRduA==}
@@ -7430,12 +7433,8 @@ packages:
   lru-cache@5.1.1:
     resolution: {integrity: sha512-KpNARQA3Iwv+jTA0utUVVbrh+Jlrr1Fv0e56GGzAFOXN7dk/FviaDW8LHmK52DlcH4WP2n6gI8vN1aesBFgo9w==}
 
-  lru-cache@6.0.0:
-    resolution: {integrity: sha512-Jo6dJ04CmSjuznwJSS3pUeWmd/H0ffTlkXXgwZi+eq1UCmqQwCh+eLsYOYCwY991i2Fah4h1BEMCx4qThGbsiA==}
-    engines: {node: '>=10'}
-
-  lru-memoizer@2.3.0:
-    resolution: {integrity: sha512-GXn7gyHAMhO13WSKrIiNfztwxodVsP8IoZ3XfrJV4yH2x0/OeTO/FIaAHTY5YekdGgW94njfuKmyyt1E0mR6Ug==}
+  lru-memoizer@3.0.0:
+    resolution: {integrity: sha1-t1kH3jOuhNSqMYwwg7mndMfl52c=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/lru-memoizer/-/lru-memoizer-3.0.0.tgz}
 
   lru_map@0.4.1:
     resolution: {integrity: sha512-I+lBvqMMFfqaV8CJCISjI3wbjmwVu/VyOoU7+qtu9d7ioW5klMgsTTiUOUp+DJvfTTzKXoPbyC6YfgkNcyPSOg==}
@@ -8112,6 +8111,10 @@ packages:
 
   qs@6.15.3:
     resolution: {integrity: sha512-O9gl3zCl5h5blw1KGUzQKhA5oUXSl8rwUIM5o0S3nCXMliSvy5Dzx7/DJcI+SwgICv+IneSZwhBh1oSyEHA71A==}
+    engines: {node: '>=0.6'}
+
+  qs@6.16.0:
+    resolution: {integrity: sha1-wixyOiipIPOqzc6Cifq9Q+zLef0=, tarball: https://ms-feed-25.pkgs.visualstudio.com/1es-public/_packaging/npm-public/npm/registry/qs/-/qs-6.16.0.tgz}
     engines: {node: '>=0.6'}
 
   querystringify@2.2.0:
@@ -9137,9 +9140,6 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
-  yallist@4.0.0:
-    resolution: {integrity: sha512-3wdGidZyq5PB084XLES5TpOSRA3wjXAlIWMhum2kRcv/41Sn2emQ0dycQW4uZXLejwKvg6EsvbdlVL+FYEct7A==}
-
   yargs-parser@21.1.1:
     resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
     engines: {node: '>=12'}
@@ -9776,10 +9776,10 @@ snapshots:
   '@chat-adapter/teams@4.39.0(patch_hash=jfm44m5wrw3jrn2jijafzk7s5a)(zod@4.4.3)':
     dependencies:
       '@chat-adapter/shared': 4.39.0(zod@4.4.3)
-      '@microsoft/teams.api': 2.0.16
-      '@microsoft/teams.apps': 2.0.16
-      '@microsoft/teams.cards': 2.0.16
-      '@microsoft/teams.graph-endpoints': 2.0.16
+      '@microsoft/teams.api': 2.1.0
+      '@microsoft/teams.apps': 2.1.0
+      '@microsoft/teams.cards': 2.1.0
+      '@microsoft/teams.graph-endpoints': 2.1.0
       chat: 4.39.0(zod@4.4.3)
     transitivePeerDependencies:
       - ai
@@ -11253,47 +11253,49 @@ snapshots:
     dependencies:
       '@chevrotain/types': 11.1.2
 
-  '@microsoft/teams.api@2.0.16':
+  '@microsoft/teams.api@2.1.0':
     dependencies:
-      '@microsoft/teams.cards': 2.0.16
-      '@microsoft/teams.common': 2.0.16
+      '@microsoft/teams.cards': 2.1.0
+      '@microsoft/teams.common': 2.1.0
+      '@opentelemetry/api': 1.9.1
       jwt-decode: 4.0.0
-      qs: 6.15.3
+      qs: 6.16.0
     transitivePeerDependencies:
       - debug
       - supports-color
 
-  '@microsoft/teams.apps@2.0.16':
+  '@microsoft/teams.apps@2.1.0':
     dependencies:
       '@azure/msal-node': 5.6.0
-      '@microsoft/teams.api': 2.0.16
-      '@microsoft/teams.common': 2.0.16
-      '@microsoft/teams.graph': 2.0.16
+      '@microsoft/teams.api': 2.1.0
+      '@microsoft/teams.common': 2.1.0
+      '@microsoft/teams.graph': 2.1.0
+      '@opentelemetry/api': 1.9.1
       axios: 1.20.0
       cors: 2.8.6
       express: 5.2.1
       jsonwebtoken: 9.0.3
-      jwks-rsa: 3.2.2
+      jwks-rsa: 4.1.0
       reflect-metadata: 0.2.2
     transitivePeerDependencies:
       - debug
       - supports-color
 
-  '@microsoft/teams.cards@2.0.16': {}
+  '@microsoft/teams.cards@2.1.0': {}
 
-  '@microsoft/teams.common@2.0.16':
+  '@microsoft/teams.common@2.1.0':
     dependencies:
       axios: 1.20.0
     transitivePeerDependencies:
       - debug
       - supports-color
 
-  '@microsoft/teams.graph-endpoints@2.0.16': {}
+  '@microsoft/teams.graph-endpoints@2.1.0': {}
 
-  '@microsoft/teams.graph@2.0.16':
+  '@microsoft/teams.graph@2.1.0':
     dependencies:
-      '@microsoft/teams.common': 2.0.16
-      qs: 6.15.3
+      '@microsoft/teams.common': 2.1.0
+      qs: 6.16.0
     transitivePeerDependencies:
       - debug
       - supports-color
@@ -15035,8 +15037,6 @@ snapshots:
 
   jiti@2.7.0: {}
 
-  jose@4.15.9: {}
-
   jose@5.10.0: {}
 
   jose@6.2.10: {}
@@ -15117,13 +15117,14 @@ snapshots:
       ecdsa-sig-formatter: 1.0.11
       safe-buffer: 5.2.1
 
-  jwks-rsa@3.2.2:
+  jwks-rsa@4.1.0:
     dependencies:
       '@types/jsonwebtoken': 9.0.10
       debug: 4.4.3
-      jose: 4.15.9
+      jose: 6.2.10
       limiter: 1.1.5
-      lru-memoizer: 2.3.0
+      lru-cache: 11.5.2
+      lru-memoizer: 3.0.0
     transitivePeerDependencies:
       - supports-color
 
@@ -15321,14 +15322,10 @@ snapshots:
     dependencies:
       yallist: 3.1.1
 
-  lru-cache@6.0.0:
-    dependencies:
-      yallist: 4.0.0
-
-  lru-memoizer@2.3.0:
+  lru-memoizer@3.0.0:
     dependencies:
       lodash.clonedeep: 4.5.0
-      lru-cache: 6.0.0
+      lru-cache: 11.5.2
 
   lru_map@0.4.1: {}
 
@@ -16338,6 +16335,11 @@ snapshots:
       side-channel: 1.1.0
 
   qs@6.15.3:
+    dependencies:
+      es-define-property: 1.0.1
+      side-channel: 1.1.1
+
+  qs@6.16.0:
     dependencies:
       es-define-property: 1.0.1
       side-channel: 1.1.1
@@ -17491,8 +17493,6 @@ snapshots:
   y18n@5.0.8: {}
 
   yallist@3.1.1: {}
-
-  yallist@4.0.0: {}
 
   yargs-parser@21.1.1: {}
 
