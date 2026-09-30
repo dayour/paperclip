@@ -398,16 +398,22 @@ describe("Teams inline images through pinned runtime/App HTTP", () => {
         app: {
           api: { serviceUrl: string };
           activitySender: {
-            client: {
-              post(url: string, data: unknown): Promise<{ data: unknown }>;
+            createClient(serviceUrl: string, agenticIdentity?: unknown): {
+              http: { post(url: string, data: unknown): Promise<{ data: unknown }> };
             };
           };
         };
       }
     ).app;
-    const post = vi
-      .spyOn(app.activitySender.client, "post")
-      .mockResolvedValue({ data: { id: "image-receipt-1" } });
+    const post = vi.fn(async (_url: string, _data: unknown) => ({
+      data: { id: "image-receipt-1" },
+    }));
+    const createClient = app.activitySender.createClient;
+    vi.spyOn(app.activitySender, "createClient").mockImplementation((...args) => {
+      const client = createClient.apply(app.activitySender, args);
+      client.http.post = (url, data) => post(url, data);
+      return client;
+    });
     return { runtime, app, post, network };
   }
   const destination = (
@@ -522,7 +528,7 @@ describe("Teams inline images through pinned runtime/App HTTP", () => {
   it("does not invent a receipt ID when the provider's successful response omits it", async () => {
     const h = await harness();
     const d = destination("channel");
-    h.post.mockResolvedValueOnce({ data: {} });
+    h.post.mockResolvedValueOnce({ data: {} } as never);
     const prepared = (await prepareTeamsInlineImage(file(png)))!;
     const result = await h.runtime
       .thread(d.thread)

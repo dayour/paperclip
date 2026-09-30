@@ -137,7 +137,9 @@ interface AppSeam {
     };
   };
   activitySender: {
-    client: { post(url: string, data: unknown): Promise<{ data: unknown }> };
+    createClient(serviceUrl: string, agenticIdentity?: unknown): {
+      http: { post(url: string, data: unknown): Promise<{ data: unknown }> };
+    };
   };
   api: { serviceUrl: string };
 }
@@ -205,9 +207,15 @@ describe("Teams opt-in file-consent runtime", () => {
           isExpired: () => false,
         };
       });
-    const post = vi
-      .spyOn(app.activitySender.client, "post")
-      .mockResolvedValue({ data: { id: "card-receipt-1" } });
+    const post = vi.fn(async (_url: string, _data: unknown) => ({
+      data: { id: "card-receipt-1" },
+    }));
+    const createClient = app.activitySender.createClient;
+    vi.spyOn(app.activitySender, "createClient").mockImplementation((...args) => {
+      const client = createClient.apply(app.activitySender, args);
+      client.http.post = (url, data) => post(url, data);
+      return client;
+    });
     const dispatch = (
       activity: unknown,
       authorization = "Bearer fixture-token",
@@ -538,7 +546,7 @@ describe("Teams opt-in file-consent runtime", () => {
     "does not retry or invent a receipt after %s",
     async (mode) => {
       const h = await harness();
-      if (mode === "missing ID") h.post.mockResolvedValueOnce({ data: {} });
+      if (mode === "missing ID") h.post.mockResolvedValueOnce({ data: {} } as never);
       else h.post.mockRejectedValueOnce(new Error(uploadCanary));
       await expect(
         h.runtime.sendTeamsFileConsentCard(

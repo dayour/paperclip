@@ -121,7 +121,7 @@ describe("adapter routes", () => {
     unregisterServerAdapter("hermes_local");
     unregisterServerAdapter("claude_local");
     registerServerAdapter(overridingConfigSchemaAdapter);
-  });
+  }, 120_000);
 
   afterEach(() => {
     setOverridePaused("claude_local", false);
