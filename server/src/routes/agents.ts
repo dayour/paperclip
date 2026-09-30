@@ -135,6 +135,7 @@ import {
   redactAgentAdapterConfig,
   redactEventPayload,
 } from "../redaction.js";
+import { getAdapterQuarantineBadgeState } from "../adapters/circuit-breaker.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
 import {
   HarnessRuntimeRequestResolutionError,
@@ -500,6 +501,7 @@ export function agentRoutes(
   const DEFAULT_INSTRUCTIONS_PATH_KEYS: Record<string, string> = {
     claude_local: "instructionsFilePath",
     codex_local: "instructionsFilePath",
+    copilot_local: "instructionsFilePath",
     droid_local: "instructionsFilePath",
     gemini_local: "instructionsFilePath",
     kimi_local: "instructionsFilePath",
@@ -1661,6 +1663,10 @@ export function agentRoutes(
 
     return {
       ...baseAgent,
+      adapterQuarantine: getAdapterQuarantineBadgeState({
+        adapterType: agent.adapterType,
+        adapterConfig: agent.adapterConfig,
+      }),
       chainOfCommand,
       access: accessState,
     };

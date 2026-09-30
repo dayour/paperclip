@@ -966,6 +966,8 @@ export function NewIssueDialog() {
     const validThinkingValues =
       assigneeAdapterType === "codex_local"
         ? codexReasoningEffortOptions(effectiveAssigneeModel)
+        : assigneeAdapterType === "copilot_local"
+          ? ISSUE_THINKING_EFFORT_OPTIONS.copilot_local
         : assigneeAdapterType === "opencode_local"
           ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
           : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;

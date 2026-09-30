@@ -278,6 +278,15 @@ import {
   PROVIDER_TRACE_MAX_BYTES,
 } from "./provider-trace-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
+import { ADAPTER_FAILURE_REASONS, classifyAdapterFailure } from "../adapters/adapter-failure-reasons.js";
+import {
+  buildCircuitKey,
+  getCircuitExecutionDecision,
+  recordAdapterFailure,
+  recordCircuitExecutionSuccess,
+  releaseUnusedCircuitProbe,
+  runProbeRound,
+} from "../adapters/circuit-breaker.js";
 import type {
   AdapterExecutionResult,
   AdapterInvocationMeta,
@@ -18000,7 +18009,7 @@ export function heartbeatService(
     const existing = await getAgent(agentId);
     if (!existing) return;
 
-    if (existing.status === "paused" || existing.status === "terminated") {
+    if (existing.status === "paused" || existing.status === "terminated" || existing.status === "quarantined") {
       return;
     }
 
@@ -19918,6 +19927,7 @@ export function heartbeatService(
           id: issues.id,
           status: issues.status,
           priority: issues.priority,
+          quarantineHold: issues.quarantineHold,
         })
         .from(issues)
         .where(
@@ -19976,6 +19986,18 @@ export function heartbeatService(
       const claimedRuns: Array<typeof heartbeatRuns.$inferSelect> = [];
       for (const queuedRun of prioritizedRuns) {
         if (claimedRuns.length >= availableSlots) break;
+        const issueId = readNonEmptyString(parseObject(queuedRun.contextSnapshot).issueId);
+        if (issueId && issueById.get(issueId)?.quarantineHold) continue;
+        const circuit = getCircuitExecutionDecision({
+          adapterType: agent.adapterType,
+          adapterConfig: agent.adapterConfig,
+          reserveProbe: false,
+        });
+        if (
+          circuit.state === "Open" ||
+          (circuit.state === "Half-Open" &&
+            parseObject(parseObject(queuedRun.contextSnapshot).circuitBreaker).probe !== true)
+        ) continue;
         const claimed = await claimQueuedRun(queuedRun, companyAgents);
         if (claimed) claimedRuns.push(claimed);
       }
@@ -25268,6 +25290,46 @@ export function heartbeatService(
           },
         );
 
+        if (persistedRunWrite.updated) {
+          const circuit = parseObject(parseObject(run.contextSnapshot).circuitBreaker);
+          const circuitKey = readNonEmptyString(circuit.key);
+          if (circuitKey) {
+            const probe = circuit.probe === true;
+            if (outcome === "succeeded") {
+              if (probe) {
+                await runProbeRound(db, agent.adapterType, { ok: true, circuitKey });
+              } else if (getCircuitExecutionDecision({
+                adapterType: agent.adapterType,
+                adapterConfig: agent.adapterConfig,
+                reserveProbe: false,
+              }).state === "Closed") {
+                recordCircuitExecutionSuccess({
+                  key: circuitKey,
+                  adapterType: agent.adapterType,
+                  adapterConfig: agent.adapterConfig,
+                });
+              }
+            } else if (outcome === "failed" || outcome === "timed_out") {
+              const failure = probe && outcome === "timed_out"
+                ? "adapter_probe_timeout"
+                : classifyAdapterFailure(adapterResult, agent.adapterType).adapterFailureReason;
+              if (probe) {
+                await runProbeRound(db, agent.adapterType, {
+                  ok: false, circuitKey, failureReason: failure,
+                });
+              } else if (ADAPTER_FAILURE_REASONS[failure].countsTowardBreaker) {
+                await recordAdapterFailure(db, {
+                  adapterType: agent.adapterType,
+                  agentId: agent.id,
+                  reason: failure,
+                });
+              }
+            } else if (probe) {
+              releaseUnusedCircuitProbe(circuitKey);
+            }
+          }
+        }
+
         const finalizedRun = persistedRun ?? (await getRun(run.id));
         if (finalizedRun) {
           await appendRunEvent(finalizedRun, {
@@ -26472,7 +26534,152 @@ export function heartbeatService(
     }
   }
 
-  async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
+  async function reconcileCircuitQuarantine(opts: {
+    now?: Date;
+    circuitKey?: string | null;
+    forceRelease?: boolean;
+  } = {}) {
+    const now = opts.now ?? new Date();
+    const held = await db.select({ issueId: issues.id }).from(issues)
+      .where(eq(issues.quarantineHold, true));
+    const stranded = await db.select({ issueId: issues.id })
+      .from(agentWakeupRequests)
+      .innerJoin(issues, and(
+        eq(issues.companyId, agentWakeupRequests.companyId),
+        eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
+        or(eq(issues.id, agentWakeupRequests.issueId),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issues.id}::text`),
+      ))
+      .where(and(
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        eq(agentWakeupRequests.reason, "adapter_quarantined"),
+      ));
+    const issueIds = [...new Set([...held, ...stranded].map(row => row.issueId))];
+    if (!issueIds.length) return { clearedHolds: 0, promotedDeferred: 0, stalePromoted: 0, failedIssues: 0 };
+
+    const candidates = await db.select({
+      issueId: issues.id,
+      companyId: issues.companyId,
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      quarantineHold: issues.quarantineHold,
+      executionState: issues.executionState,
+      adapterType: agents.adapterType,
+      adapterConfig: agents.adapterConfig,
+      agentStatus: agents.status,
+    }).from(issues).innerJoin(agents, eq(issues.assigneeAgentId, agents.id))
+      .where(inArray(issues.id, issueIds));
+    let clearedHolds = 0;
+    let promotedDeferred = 0;
+    let stalePromoted = 0;
+    let failedIssues = 0;
+
+    for (const issue of candidates) {
+      try {
+      if (!issue.assigneeAgentId) continue;
+      const key = buildCircuitKey({
+        adapterType: issue.adapterType,
+        adapterConfig: issue.adapterConfig,
+      });
+      if (opts.circuitKey && opts.circuitKey !== key) continue;
+      const decision = getCircuitExecutionDecision({
+        adapterType: issue.adapterType,
+        adapterConfig: issue.adapterConfig,
+        now,
+        reserveProbe: false,
+      });
+      if (decision.action === "defer" || issue.status === "done" || issue.status === "cancelled") continue;
+
+      await issuesSvc.clearExecutionRunIfTerminal(issue.issueId);
+      await issuesSvc.clearCheckoutRunIfTerminal(issue.issueId);
+      if (await getExecutionBlocker(db, issue.companyId, issue.issueId)) continue;
+
+      const [wake] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, issue.companyId),
+        eq(agentWakeupRequests.agentId, issue.assigneeAgentId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        or(eq(agentWakeupRequests.issueId, issue.issueId),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.issueId}`),
+      )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1);
+      if (!wake) {
+        if (issue.quarantineHold && decision.state === "Closed") {
+          const heldUntil = Date.parse(String(
+            parseObject(parseObject(issue.executionState).quarantineHold).resumeAt ?? "",
+          ));
+          if (!opts.forceRelease && Number.isFinite(heldUntil) && heldUntil > now.getTime()) continue;
+          const cleared = await db.update(issues).set({
+            quarantineHold: false,
+            executionState: sql`coalesce(${issues.executionState}, '{}'::jsonb) - 'quarantineHold'`,
+            updatedAt: now,
+          }).where(and(eq(issues.id, issue.issueId), eq(issues.quarantineHold, true)))
+            .returning({ id: issues.id });
+          clearedHolds += cleared.length;
+          if (cleared.length && issue.agentStatus === "quarantined") {
+            await db.update(agents).set({ status: "idle", updatedAt: now })
+              .where(and(eq(agents.id, issue.assigneeAgentId), eq(agents.status, "quarantined")));
+          }
+        }
+        continue;
+      }
+
+      if (decision.state === "Closed" && wake.reason === "adapter_quarantined") {
+        const resumeAt = wake.scheduledAt?.getTime()
+          ?? Date.parse(String(parseObject(parseObject(wake.payload).circuitBreaker).resumeAt ?? ""));
+        // Circuit state is process-local. After a restart, keep honoring the
+        // persisted quarantine deadline before releasing its deferred work.
+        if (!opts.forceRelease && (!Number.isFinite(resumeAt) || resumeAt > now.getTime())) continue;
+      }
+      if (issue.agentStatus === "quarantined") {
+        await db.update(agents).set({ status: "idle", updatedAt: now })
+          .where(and(eq(agents.id, issue.assigneeAgentId), eq(agents.status, "quarantined")));
+      }
+      const savedPayload = parseObject(wake.payload);
+      const savedContext = parseObject(savedPayload[DEFERRED_WAKE_CONTEXT_KEY]);
+      const releasePayload = { ...savedPayload };
+      delete releasePayload[DEFERRED_WAKE_CONTEXT_KEY];
+      let promoted: Awaited<ReturnType<typeof enqueueWakeup>>;
+      try {
+        promoted = await enqueueWakeup(issue.assigneeAgentId, {
+        source: (wake.source as WakeupOptions["source"]) ?? "automation",
+        triggerDetail: (wake.triggerDetail as WakeupOptions["triggerDetail"]) ?? "system",
+        reason: readNonEmptyString(savedContext.wakeReason) ?? wake.reason,
+        payload: releasePayload,
+        contextSnapshot: { ...savedContext, issueId: issue.issueId },
+        requestedByActorType:
+          wake.requestedByActorType === "user" ||
+          wake.requestedByActorType === "agent" ||
+          wake.requestedByActorType === "system"
+            ? wake.requestedByActorType
+            : undefined,
+        requestedByActorId: wake.requestedByActorId,
+        manualUserWake: savedPayload.manualUserWake === true && wake.requestedByActorType === "user",
+        }, undefined, wake.id);
+      } catch (error) {
+        if (decision.state === "Half-Open") releaseUnusedCircuitProbe(key);
+        throw error;
+      }
+      if (promoted) {
+        promotedDeferred += 1;
+        if (issue.quarantineHold) clearedHolds += 1;
+        else stalePromoted += 1;
+      } else if (decision.state === "Half-Open") {
+        releaseUnusedCircuitProbe(key);
+      }
+      } catch (error) {
+        failedIssues += 1;
+        logger.warn({ err: error, issueId: issue.issueId },
+          "circuit reconciliation left this issue deferred for a later retry");
+      }
+    }
+    return { clearedHolds, promotedDeferred, stalePromoted, failedIssues };
+  }
+
+  async function enqueueWakeup(
+    agentId: string,
+    opts: WakeupOptions = {},
+    executionWaitRequestId?: string,
+    quarantineReleaseWakeId?: string,
+  ) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -26713,7 +26920,8 @@ export function heartbeatService(
     // run and no path until a person noticed.
     if (
       schedulingSuppression.suppressed &&
-      schedulingSuppression.reason !== "task_drain"
+      schedulingSuppression.reason !== "task_drain" &&
+      !quarantineReleaseWakeId
     ) {
       await writeSkippedHeartbeatRequest("heartbeat.scheduling_suppressed", {
         reason: schedulingSuppression.reason,
@@ -26920,7 +27128,9 @@ export function heartbeatService(
     }
 
     const invokability = await getAgentInvokability(agent);
-    if (!invokability.invokable) {
+    const quarantinedAdmission = agent.status === "quarantined" && Boolean(issueId) &&
+      (await evaluateAgentInvokabilityFromDb(db, { ...agent, status: "idle" })).invokable;
+    if (!invokability.invokable && !quarantinedAdmission) {
       if (opts.requestedByActorType !== "user" || executionWaitRequestId) {
         await writeSkippedRequest("agent.not_invokable", {
           error: invokability.message,
@@ -26961,6 +27171,25 @@ export function heartbeatService(
           "No assigned todo or in_progress issue requires this agent before timer adapter invocation.",
       });
       await markTimerHeartbeatChecked(agentId, source);
+      return null;
+    }
+
+    const circuitDecision = getCircuitExecutionDecision({
+      adapterType: agent.adapterType,
+      adapterConfig: agent.adapterConfig,
+      reserveProbe: Boolean(quarantineReleaseWakeId),
+    });
+    if (circuitDecision.key) {
+      enrichedContextSnapshot.circuitBreaker = {
+        key: circuitDecision.key,
+        probe: circuitDecision.action === "probe" && Boolean(quarantineReleaseWakeId),
+        state: circuitDecision.state,
+        shadowMode: circuitDecision.shadowMode,
+        ...(circuitDecision.resumeAt ? { resumeAt: circuitDecision.resumeAt } : {}),
+      };
+    }
+    if (circuitDecision.action === "defer" && !issueId) {
+      await writeSkippedRequest("adapter.quarantined");
       return null;
     }
 
@@ -27255,6 +27484,7 @@ export function heartbeatService(
               assigneeAgentId: issues.assigneeAgentId,
               executionRunId: issues.executionRunId,
               executionAgentNameKey: issues.executionAgentNameKey,
+              quarantineHold: issues.quarantineHold,
               createdAt: issues.createdAt,
             })
             .from(issues)
@@ -27282,6 +27512,81 @@ export function heartbeatService(
               finishedAt: new Date(),
             });
             return { kind: "skipped" as const };
+          }
+
+          if (quarantineReleaseWakeId) {
+            const [pending] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.id, quarantineReleaseWakeId),
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              or(eq(agentWakeupRequests.issueId, issue.id),
+                sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`),
+            )).limit(1);
+            if (!pending || circuitDecision.action === "defer") return { kind: "deferred" as const };
+          } else if (
+            circuitDecision.action === "defer" ||
+            circuitDecision.state === "Half-Open" ||
+            issue.quarantineHold
+          ) {
+            if (circuitDecision.state !== "Half-Open" || issue.quarantineHold) {
+              await tx.update(issues).set({
+                quarantineHold: true,
+                updatedAt: new Date(),
+              }).where(eq(issues.id, issue.id));
+            }
+            const deferredPayload = {
+              ...(payload ?? {}),
+              issueId,
+              [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+            };
+            const automatic = opts.requestedByActorType !== "user" && !durableRequest;
+            const existing = automatic ? await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              eq(agentWakeupRequests.reason, "adapter_quarantined"),
+              or(eq(agentWakeupRequests.issueId, issue.id),
+                sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`),
+            )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1).then(rows => rows[0] ?? null) : null;
+            if (existing) {
+              const existingPayload = parseObject(existing.payload);
+              await tx.update(agentWakeupRequests).set({
+                issueId,
+                payload: {
+                  ...existingPayload,
+                  ...(payload ?? {}),
+                  issueId,
+                  [DEFERRED_WAKE_CONTEXT_KEY]: mergeCoalescedContextSnapshot(
+                    parseObject(existingPayload[DEFERRED_WAKE_CONTEXT_KEY]),
+                    enrichedContextSnapshot,
+                  ),
+                },
+                scheduledAt: circuitDecision.resumeAt ? new Date(circuitDecision.resumeAt) : existing.scheduledAt,
+                coalescedCount: (existing.coalescedCount ?? 0) + 1,
+                updatedAt: new Date(),
+              }).where(and(
+                eq(agentWakeupRequests.id, existing.id),
+                eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              ));
+            } else {
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                issueId,
+                source,
+                triggerDetail,
+                reason: automatic ? "adapter_quarantined" : reason,
+                payload: deferredPayload,
+                status: "deferred_issue_execution",
+                scheduledAt: circuitDecision.resumeAt ? new Date(circuitDecision.resumeAt) : null,
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+              });
+            }
+            return { kind: "deferred" as const };
           }
 
           if (opts.failedRunId) {
@@ -28252,23 +28557,42 @@ export function heartbeatService(
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
           }
 
-          const wakeupRequest = await tx
-            .insert(agentWakeupRequests)
-            .values({
-              ...durableReceiptFields,
-              companyId: agent.companyId,
-              agentId,
-              source,
-              triggerDetail,
-              reason,
-              payload,
-              status: "queued",
-              requestedByActorType: opts.requestedByActorType ?? null,
-              requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
-            })
-            .returning()
-            .then((rows) => rows[0]);
+          const wakeupRequest = quarantineReleaseWakeId
+            ? await tx.update(agentWakeupRequests).set({
+                status: "queued",
+                reason: "issue_execution_promoted",
+                scheduledAt: null,
+                claimedAt: null,
+                finishedAt: null,
+                error: null,
+                updatedAt: new Date(),
+              }).where(and(
+                eq(agentWakeupRequests.id, quarantineReleaseWakeId),
+                eq(agentWakeupRequests.companyId, agent.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              )).returning().then((rows) => rows[0] ?? null)
+            : await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields,
+                companyId: agent.companyId,
+                agentId,
+                source,
+                triggerDetail,
+                reason,
+                payload,
+                status: "queued",
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+              }).returning().then((rows) => rows[0] ?? null);
+          if (!wakeupRequest) return { kind: "deferred" as const };
+          if (quarantineReleaseWakeId && issue.quarantineHold) {
+            await tx.update(issues).set({
+              quarantineHold: false,
+              executionState: sql`coalesce(${issues.executionState}, '{}'::jsonb) - 'quarantineHold'`,
+              updatedAt: new Date(),
+            }).where(and(eq(issues.id, issue.id), eq(issues.quarantineHold, true)));
+          }
 
           // A handoff changes the executor, not the owner of saved user input.
           // Validate its exact stopped source while the issue row is locked;
@@ -29370,6 +29694,11 @@ export function heartbeatService(
       const cancelled = cancellation.run;
 
       if (cancellation.updated && cancelled) {
+        if (run.status === "queued" || run.status === "scheduled_retry") {
+          const circuit = parseObject(parseObject(run.contextSnapshot).circuitBreaker);
+          const key = readNonEmptyString(circuit.key);
+          if (key && circuit.probe === true) releaseUnusedCircuitProbe(key);
+        }
         await setWakeupStatus(run.wakeupRequestId, "cancelled", {
           finishedAt: cancelled.finishedAt ?? new Date(),
           error: reason,
@@ -29916,6 +30245,7 @@ export function heartbeatService(
     reconcileStrandedAssignedIssues,
     recoverPendingSessionGoalActions,
     recoverActiveSessionGoals,
+    reconcileCircuitQuarantine,
 
     terminalizeRunOnLeaseRelease,
 

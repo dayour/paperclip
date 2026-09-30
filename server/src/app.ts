@@ -121,6 +121,7 @@ import {
 import { adapterRoutes } from "./routes/adapters.js";
 import { managedAgentProfileRoutes } from "./routes/managed-agent-profiles.js";
 import { remoteAgentProfileRoutes } from "./routes/remote-agent-profiles.js";
+import { adminAdapterRoutes, adapterQuarantineRoutes } from "./routes/admin-adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
 import { staticUiCacheControl } from "./static-ui-cache.js";
@@ -939,11 +940,14 @@ export async function createApp(
   );
   api.use(
     adapterRoutes({
+      db,
       getNativeRunnerEnabled: async () =>
         (await instanceSettingsService(db).getExperimental())
           .enableNativeRunner === true,
     }),
   );
+  api.use(adapterQuarantineRoutes(db));
+  api.use("/admin/adapters", adminAdapterRoutes(db));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,

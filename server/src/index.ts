@@ -1535,6 +1535,10 @@ async function startServerWithDatabaseTeardown(
             "startup session-goal recovery resumed durable agent goals",
           );
         }
+        const circuitReconciled = await heartbeat.reconcileCircuitQuarantine();
+        if (circuitReconciled.clearedHolds > 0 || circuitReconciled.promotedDeferred > 0 || circuitReconciled.failedIssues > 0) {
+          logger.warn({ ...circuitReconciled }, "startup adapter circuit reconciliation changed deferred issue state");
+        }
         const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
         if (
           promotion.promoted > 0 ||
@@ -1777,6 +1781,10 @@ async function startServerWithDatabaseTeardown(
             .then(() => heartbeat.promoteDueScheduledRetries())
             .then(async (promotion) => {
               await heartbeat.resumeQueuedRuns();
+              const circuitReconciled = await heartbeat.reconcileCircuitQuarantine();
+              if (circuitReconciled.clearedHolds > 0 || circuitReconciled.promotedDeferred > 0 || circuitReconciled.failedIssues > 0) {
+                logger.warn({ ...circuitReconciled }, "periodic adapter circuit reconciliation changed deferred issue state");
+              }
               const reconciled = await heartbeat.reconcileStrandedAssignedIssues();
               if (
                 promotion.promoted > 0 ||

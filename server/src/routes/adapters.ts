@@ -19,6 +19,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Router } from "express";
+import type { Db } from "@paperclipai/db";
 import {
   listServerAdapters,
   findServerAdapter,
@@ -30,6 +31,8 @@ import {
   isOverridePaused,
   setOverridePaused,
 } from "../adapters/registry.js";
+import { buildCircuitKey } from "../adapters/circuit-breaker.js";
+import { getAdapterSessionManagement } from "@paperclipai/adapter-utils";
 import {
   listAdapterPlugins,
   addAdapterPlugin,
@@ -52,6 +55,7 @@ import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { getHiddenSettings } from "../services/settings-visibility.js";
 import { assertBoardOrgAccess, assertInstanceAdmin } from "./authz.js";
 import { BUILTIN_ADAPTER_TYPES } from "../adapters/builtin-adapter-types.js";
+import { heartbeatService } from "../services/heartbeat.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -258,8 +262,10 @@ function registerWithSessionManagement(adapter: ServerAdapterModule): void {
 // ---------------------------------------------------------------------------
 
 export function adapterRoutes(options: {
+  db?: Db;
   getNativeRunnerEnabled?: () => Promise<boolean>;
 } = {}) {
+  const { db } = options;
   const router = Router();
 
   /**
@@ -504,6 +510,12 @@ export function adapterRoutes(options: {
     }
 
     const changed = setOverridePaused(adapterType, paused);
+    if (changed && !paused && db) {
+      const heartbeat = heartbeatService(db);
+      await heartbeat.reconcileCircuitQuarantine({
+        circuitKey: buildCircuitKey({ adapterType, adapterConfig: null }),
+      });
+    }
 
     logger.info({ type: adapterType, paused, changed }, "Adapter override toggle");
 

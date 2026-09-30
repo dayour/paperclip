@@ -670,6 +670,16 @@ export interface IssueExecutionMonitorPolicy {
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
 }
 
+export interface IssueQuarantineHoldState {
+  adapterType: string;
+  circuitKey: string;
+  routeKey: string;
+  state: "open" | "halfOpen";
+  trippedAt: string;
+  resumeAt: string | null;
+  reason: string | null;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
@@ -720,6 +730,7 @@ export interface IssueExecutionState {
   monitor?: IssueExecutionMonitorState | null;
   /** Consecutive agent-initiated changes-requested rounds on the current stage. */
   changesRequestedCount?: number;
+  quarantineHold?: IssueQuarantineHoldState | null;
 }
 
 export interface IssueExecutionDecision {
@@ -818,6 +829,8 @@ export interface Issue {
   requestDepth: number;
   billingCode: string | null;
   assigneeAdapterOverrides: IssueAssigneeAdapterOverrides | null;
+  quarantineHold?: boolean;
+  quarantineResumeAt?: string | null;
   executionPolicy?: IssueExecutionPolicy | null;
   executionState?: IssueExecutionState | null;
   monitorNextCheckAt?: Date | null;

@@ -1169,3 +1169,11 @@ export async function resetPostgresDatabase(
 }
 
 export type Db = ReturnType<typeof createDb>;
+// Tx is the transaction context passed to db.transaction() callbacks.
+// Derived from Db so it stays in sync if drizzle-orm changes the signature.
+export type Tx = Db["transaction"] extends (
+  cb: (tx: infer T, ...args: any[]) => any,
+  ...args: any[]
+) => any
+  ? T
+  : never;

@@ -1082,6 +1082,12 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         const issueRow =
           (contextIssueId ? candidateIssues.find((candidate) => candidate.id === contextIssueId) : candidateIssues[0]) ?? null;
 
+        // Release the finishing run's locks, but leave every deferred receipt
+        // untouched until circuit reconciliation clears the issue hold.
+        if (issueRow?.quarantineHold) {
+          return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+        }
+
         // A queue interrupt authorizes only its original pending queue. Replays
         // after dispatch or deleting the final message cannot launch other work.
         const interruptQueueId = run.runtimeMode !== "native"

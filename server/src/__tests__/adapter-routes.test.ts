@@ -168,6 +168,26 @@ describe("adapter routes", () => {
       });
   });
 
+  it("lists Copilot as a built-in with an SDK configuration schema", async () => {
+    const app = createApp();
+    const adapters = await request(app).get("/api/adapters");
+    expect(adapters.status).toBe(200);
+    expect(adapters.body).toContainEqual(
+      expect.objectContaining({
+        type: "copilot_local",
+        source: "builtin",
+        disabled: false,
+        capabilities: expect.objectContaining({ supportsInstructionsBundle: true }),
+      }),
+    );
+
+    const schema = await request(app).get("/api/adapters/copilot_local/config-schema");
+    expect(schema.status).toBe(200);
+    expect(schema.body.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: "transport", default: "sdk" }),
+    ]));
+  });
+
   it("GET /api/adapters returns correct capabilities for built-in adapters", async () => {
     const app = createApp();
 

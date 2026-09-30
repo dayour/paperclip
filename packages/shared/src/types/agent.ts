@@ -102,6 +102,9 @@ export interface Agent {
   pausedAt: Date | null;
   errorReason?: string | null;
   permissions: AgentPermissions;
+  adapterQuarantine?: {
+    resumeAt: string | null;
+  } | null;
   lastHeartbeatAt: Date | null;
   metadata: Record<string, unknown> | null;
   orgChainHealth?: AgentOrgChainHealth;

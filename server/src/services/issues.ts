@@ -2060,6 +2060,7 @@ export const TERMINAL_HEARTBEAT_RUN_STATUSES = new Set([
   "cancelled",
   "timed_out",
 ]);
+const STALE_UNSTARTED_ORPHAN_WINDOW_MS = 15 * 60 * 1000;
 const ISSUE_LIST_DESCRIPTION_MAX_CHARS = 1200;
 const ISSUE_LIST_DESCRIPTION_MAX_BYTES = ISSUE_LIST_DESCRIPTION_MAX_CHARS * 4;
 
@@ -7722,6 +7723,82 @@ export function issueService(db: Db) {
     });
   }
 
+  async function clearStaleUnstartedOrphanLocks(issueId: string): Promise<void> {
+    await db.transaction(async (tx) => {
+      const [issue] = await tx.select({
+        id: issues.id,
+        companyId: issues.companyId,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      }).from(issues).where(eq(issues.id, issueId)).for("update");
+      if (!issue) return;
+
+      const now = new Date();
+      for (const runId of new Set(
+        [issue.executionRunId, issue.checkoutRunId].filter((id): id is string => id !== null),
+      )) {
+        const [run] = await tx.select({
+          agentId: heartbeatRuns.agentId,
+          companyId: heartbeatRuns.companyId,
+          status: heartbeatRuns.status,
+          startedAt: heartbeatRuns.startedAt,
+          createdAt: heartbeatRuns.createdAt,
+          wakeupRequestId: heartbeatRuns.wakeupRequestId,
+          contextSnapshot: heartbeatRuns.contextSnapshot,
+        }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).for("update");
+        if (
+          !run || run.companyId !== issue.companyId ||
+          run.status !== "queued" || run.startedAt || run.wakeupRequestId ||
+          parseObject(run.contextSnapshot).issueId !== issueId ||
+          now.getTime() - run.createdAt.getTime() < STALE_UNSTARTED_ORPHAN_WINDOW_MS
+        ) continue;
+
+        const [cancelled] = await tx.update(heartbeatRuns).set({
+          status: "cancelled",
+          error: "stale unstarted orphan issue lock auto-drained",
+          finishedAt: now,
+          updatedAt: now,
+        }).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "queued")))
+          .returning({ id: heartbeatRuns.id });
+        if (!cancelled) continue;
+
+        const clearsExecution = issue.executionRunId === runId;
+        const clearsCheckout = issue.checkoutRunId === runId;
+        await tx.update(issues).set({
+          ...(clearsExecution ? {
+            executionRunId: null,
+            executionAgentNameKey: null,
+            executionLockedAt: null,
+          } : {}),
+          ...(clearsCheckout ? { checkoutRunId: null } : {}),
+          updatedAt: now,
+        }).where(and(
+          eq(issues.id, issueId),
+          clearsExecution ? eq(issues.executionRunId, runId) : undefined,
+          clearsCheckout ? eq(issues.checkoutRunId, runId) : undefined,
+        ));
+        await tx.insert(activityLog).values({
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "issue_service:auto_drain",
+          action: "issue.execution_run_auto_drained",
+          entityType: "issue",
+          entityId: issueId,
+          agentId: issue.assigneeAgentId,
+          runId,
+          details: {
+            orphanRunId: runId,
+            orphanAgentId: run.agentId,
+            reason: "stale_unstarted_orphan",
+            clearedExecution: clearsExecution,
+            clearedCheckout: clearsCheckout,
+          },
+        });
+      }
+    });
+  }
+
   async function addStopRelayCommentIfNeeded(
     child: typeof issues.$inferSelect,
     dbOrTx: any = db,
@@ -11384,6 +11461,7 @@ export function issueService(db: Db) {
 
       await clearExecutionRunIfTerminal(id);
       await clearCheckoutRunIfTerminal(id);
+      await clearStaleUnstartedOrphanLocks(id);
 
       const dependencyReadiness = await listIssueDependencyReadinessMap(
         db,
@@ -11603,6 +11681,7 @@ export function issueService(db: Db) {
     ) => {
       await clearExecutionRunIfTerminal(id);
       await clearCheckoutRunIfTerminal(id);
+      await clearStaleUnstartedOrphanLocks(id);
       const loadCurrent = () =>
         db
           .select({

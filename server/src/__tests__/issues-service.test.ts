@@ -3,6 +3,7 @@ import { asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { sql } from "drizzle-orm";
 import {
+  agentWakeupRequests,
   activityLog,
   agents,
   companies,
@@ -546,6 +547,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueInboxArchives);
     await db.delete(issueReadStates);
     await db.delete(activityLog);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(documents);
     await db.delete(executionWorkspaces);
@@ -3138,6 +3140,8 @@ describeEmbeddedPostgres("issueService.create workspace inheritance", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -4137,6 +4141,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
     await db.delete(issueRelations);
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
+    await db.delete(heartbeatRuns);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(workspaceOperations);
     await db.delete(executionWorkspaces);
@@ -4934,6 +4940,385 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         }],
       },
     });
+  });
+
+  it("clears stale queued execution locks before checkout when the lock belongs to another agent", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const lockAgentId = randomUUID();
+    const executionRunId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Assignee",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: lockAgentId,
+        companyId,
+        name: "LockOwner",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+
+    await db.insert(heartbeatRuns).values({
+      id: executionRunId,
+      companyId,
+      agentId: lockAgentId,
+      status: "queued",
+      createdAt: new Date("2026-03-26T10:00:00.000Z"),
+      contextSnapshot: { issueId },
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stale lock issue",
+      status: "todo",
+      priority: "medium",
+      assigneeAgentId,
+      executionRunId,
+      executionAgentNameKey: "LockOwner",
+    });
+
+    const checkedOut = await svc.checkout(issueId, assigneeAgentId, ["todo"], null);
+
+    expect(checkedOut.status).toBe("in_progress");
+    expect(checkedOut.assigneeAgentId).toBe(assigneeAgentId);
+    expect(checkedOut.executionRunId).toBeNull();
+    expect(checkedOut.executionAgentNameKey).toBeNull();
+    expect(checkedOut.executionLockedAt).toBeNull();
+  });
+
+  it("drains an unstarted orphan once while retaining a different live checkout owner", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const orphanAgentId = randomUUID();
+    const issueId = randomUUID();
+    const orphanRunId = randomUUID();
+    const checkoutRunId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId, companyId, name: "Assignee", role: "engineer",
+        status: "active", adapterType: "codex_local", adapterConfig: {},
+        runtimeConfig: {}, permissions: {},
+      },
+      {
+        id: orphanAgentId, companyId, name: "Old owner", role: "engineer",
+        status: "active", adapterType: "codex_local", adapterConfig: {},
+        runtimeConfig: {}, permissions: {},
+      },
+    ]);
+    await db.insert(heartbeatRuns).values([
+      {
+        id: orphanRunId, companyId, agentId: orphanAgentId, status: "queued",
+        contextSnapshot: { issueId },
+        createdAt: new Date("2026-03-26T10:00:00.000Z"),
+      },
+      {
+        id: checkoutRunId, companyId, agentId: assigneeAgentId, status: "running",
+        contextSnapshot: { issueId },
+        startedAt: new Date(),
+      },
+    ]);
+    await db.insert(issues).values({
+      id: issueId, companyId, title: "Stale execution with live checkout",
+      status: "in_progress", priority: "medium", assigneeAgentId,
+      executionRunId: orphanRunId, checkoutRunId,
+    });
+
+    const [first, second] = await Promise.all([
+      svc.assertCheckoutOwner(issueId, assigneeAgentId, checkoutRunId),
+      svc.assertCheckoutOwner(issueId, assigneeAgentId, checkoutRunId),
+    ]);
+    expect(first.checkoutRunId).toBe(checkoutRunId);
+    expect(second.checkoutRunId).toBe(checkoutRunId);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [orphan] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, orphanRunId));
+    const [owner] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, checkoutRunId));
+    const logs = await db.select().from(activityLog).where(eq(activityLog.action, "issue.execution_run_auto_drained"));
+    expect(issue?.executionRunId).toBeNull();
+    expect(issue?.checkoutRunId).toBe(checkoutRunId);
+    expect(orphan?.status).toBe("cancelled");
+    expect(owner?.status).toBe("running");
+    expect(logs.filter((log) => log.entityId === issueId)).toHaveLength(1);
+  });
+
+  it("preserves a queued run and its saved wake instead of treating age alone as an orphan", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const lockAgentId = randomUUID();
+    const actorRunId = randomUUID();
+    const executionRunId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Assignee",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: lockAgentId,
+        companyId,
+        name: "LockOwner",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId: lockAgentId,
+      source: "issue_comment_mentioned",
+      status: "queued",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: executionRunId,
+      companyId,
+      agentId: lockAgentId,
+      wakeupRequestId,
+      status: "queued",
+      createdAt: new Date("2026-03-26T10:00:00.000Z"),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stale comment lock issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId,
+      executionRunId,
+      executionAgentNameKey: "lock-owner",
+    });
+    // actorRunId must exist in heartbeat_runs to satisfy issues.checkout_run_id FK
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      createdAt: new Date(),
+      startedAt: new Date(),
+    });
+
+    await expect(svc.assertCheckoutOwner(issueId, assigneeAgentId, actorRunId))
+      .rejects.toMatchObject({ status: 409 });
+
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [runRow] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, executionRunId));
+    const [wakeupRow] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const drainLogs = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
+
+    expect(issueRow?.checkoutRunId).toBeNull();
+    expect(issueRow?.executionRunId).toBe(executionRunId);
+    expect(runRow?.status).toBe("queued");
+    expect(wakeupRow?.status).toBe("queued");
+    expect(drainLogs.some((log) => log.entityId === issueId)).toBe(false);
+  });
+
+  it("does not cancel a running checkout predecessor without a terminal receipt", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const lockAgentId = randomUUID();
+    const actorRunId = randomUUID();
+    const executionRunId = randomUUID();
+    const wakeupRequestId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values([
+      {
+        id: assigneeAgentId,
+        companyId,
+        name: "Assignee",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+      {
+        id: lockAgentId,
+        companyId,
+        name: "LockOwner",
+        role: "engineer",
+        status: "active",
+        adapterType: "codex_local",
+        adapterConfig: {},
+        runtimeConfig: {},
+        permissions: {},
+      },
+    ]);
+    await db.insert(agentWakeupRequests).values({
+      id: wakeupRequestId,
+      companyId,
+      agentId: lockAgentId,
+      source: "issue_comment_mentioned",
+      status: "claimed",
+    });
+    await db.insert(heartbeatRuns).values({
+      id: executionRunId,
+      companyId,
+      agentId: lockAgentId,
+      wakeupRequestId,
+      status: "running",
+      createdAt: new Date("2026-03-26T10:00:00.000Z"),
+      startedAt: new Date("2026-03-26T10:00:05.000Z"),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Stale patch lock issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId,
+      executionRunId,
+      executionAgentNameKey: "lock-owner",
+    });
+    // actorRunId must exist in heartbeat_runs to satisfy issues.checkout_run_id FK
+    await db.insert(heartbeatRuns).values({
+      id: actorRunId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      createdAt: new Date(),
+      startedAt: new Date(),
+    });
+
+    await expect(svc.assertCheckoutOwner(issueId, assigneeAgentId, actorRunId))
+      .rejects.toMatchObject({ status: 409 });
+
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [runRow] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, executionRunId));
+    const [wakeupRow] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const drainLogs = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
+
+    expect(issueRow?.checkoutRunId).toBeNull();
+    expect(issueRow?.executionRunId).toBe(executionRunId);
+    expect(runRow?.status).toBe("running");
+    expect(wakeupRow?.status).toBe("claimed");
+    expect(drainLogs.some((log) => log.entityId === issueId)).toBe(false);
+  });
+
+  it("preserves the active execution lock for the current assignee on write paths", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+    const runId = randomUUID();
+    const issueId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "Assignee",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId: assigneeAgentId,
+      status: "running",
+      createdAt: new Date("2026-03-26T10:00:00.000Z"),
+      startedAt: new Date("2026-03-26T10:00:05.000Z"),
+    });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Legitimate active lock issue",
+      status: "in_progress",
+      priority: "medium",
+      assigneeAgentId,
+      checkoutRunId: runId,
+      executionRunId: runId,
+      executionAgentNameKey: "assignee",
+    });
+
+    const ownership = await svc.assertCheckoutOwner(issueId, assigneeAgentId, runId);
+    const comment = await svc.addComment(issueId, "Still mine", {
+      agentId: assigneeAgentId,
+      runId,
+    });
+
+    expect(ownership.adoptedFromRunId).toBeNull();
+    expect(ownership.checkoutRunId).toBe(runId);
+    expect(ownership.executionRunId).toBe(runId);
+    expect(comment.createdByRunId).toBe(runId);
+
+    const [issueRow] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [runRow] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const drainLogs = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.action, "issue.execution_run_auto_drained"));
+
+    expect(issueRow?.checkoutRunId).toBe(runId);
+    expect(issueRow?.executionRunId).toBe(runId);
+    expect(runRow?.status).toBe("running");
+    expect(drainLogs).toHaveLength(0);
   });
 
   it("wakes parents only when all direct children are terminal", async () => {

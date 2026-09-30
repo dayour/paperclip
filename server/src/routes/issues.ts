@@ -303,6 +303,7 @@ import {
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
+import { getAdapterQuarantineBadgeState } from "../adapters/circuit-breaker.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import {
   buildPromotedSourceTrust,
@@ -4392,6 +4393,16 @@ export function issueRoutes(
     const end = endRaw === "" ? contentLength - 1 : Number.parseInt(endRaw, 10);
     if (!Number.isSafeInteger(end) || end < start) return { kind: "invalid" };
     return { kind: "range", start, end: Math.min(end, contentLength - 1) };
+  }
+
+  async function resolveIssueQuarantineResumeAt(issue: Awaited<ReturnType<typeof svc.getById>>) {
+    if (!issue?.quarantineHold || !issue.assigneeAgentId) return null;
+    const assignee = await agentsSvc.getById(issue.assigneeAgentId);
+    if (!assignee) return null;
+    return getAdapterQuarantineBadgeState({
+      adapterType: assignee.adapterType,
+      adapterConfig: assignee.adapterConfig,
+    })?.resumeAt ?? null;
   }
 
   function parseBooleanQuery(value: unknown) {
@@ -8763,6 +8774,7 @@ export function issueRoutes(
       linkedCases,
       inboxArchiveFields,
       externalChannelBinding,
+      quarantineResumeAt,
     ] = await Promise.all([
       resolveIssueProjectAndGoal(issue),
       svc.getAncestors(issue.id),
@@ -8782,6 +8794,7 @@ export function issueRoutes(
       listIssueLinkedCases(db, issue.companyId, issue.id),
       inboxArchiveFieldsPromise,
       getExternalChannelBindingSummary(db, issue.companyId, issue.id),
+      resolveIssueQuarantineResumeAt(issue),
     ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -8828,6 +8841,7 @@ export function issueRoutes(
       referencedIssueIdentifiers: referenceSummary.outbound.map(
         (item) => item.issue.identifier ?? item.issue.id,
       ),
+      quarantineResumeAt,
       ...documentPayload,
       project: compactIssueProject(project),
       goal: goal ?? null,

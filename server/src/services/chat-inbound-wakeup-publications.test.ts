@@ -48,6 +48,8 @@ function fixture() {
     id: action.id,
     companyId: action.companyId,
     agentId: action.payload.agentId,
+    issueId: action.payload.issueId,
+    scheduledAt: null,
     source: "assignment",
     triggerDetail: "system",
     reason: "PRIVATE scheduler reason",

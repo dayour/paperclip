@@ -342,6 +342,38 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
+  it("releases only the finishing run's locks while circuit quarantine holds both deferred receipts", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId });
+    const runId = await seedRun({ companyId, agentId, status: "failed", contextSnapshot: { issueId } });
+    await db.update(issues).set({
+      quarantineHold: true,
+      executionRunId: runId,
+      checkoutRunId: runId,
+    }).where(eq(issues.id, issueId));
+    const userWakeId = await seedDeferredWake({ companyId, agentId, issueId,
+      requestedByActorType: "user", requestedByActorId: "board-user" });
+    const circuitWakeId = await seedDeferredWake({ companyId, agentId, issueId,
+      requestedByActorType: "system", requestedByActorId: "circuit" });
+    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    const release = () => adapter.withIssueExecutionLock(
+      { companyId, runId, now: new Date() },
+      async () => { throw new Error("quarantined work must not be promoted"); },
+    );
+    expect((await release()).outcome.kind).toBe("released");
+    expect((await release()).outcome.kind).toBe("released");
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const wakes = await db.select().from(agentWakeupRequests);
+    expect(issue).toMatchObject({ quarantineHold: true, executionRunId: null, checkoutRunId: null });
+    expect(wakes.filter(wake => wake.id === userWakeId || wake.id === circuitWakeId))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: userWakeId, status: "deferred_issue_execution" }),
+        expect.objectContaining({ id: circuitWakeId, status: "deferred_issue_execution" }),
+      ]));
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
+
   it.each(["in_progress", "blocked"])("preserves recovery ownership and queued messages when a native task fails from %s", async (status) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });

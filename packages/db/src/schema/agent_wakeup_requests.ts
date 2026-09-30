@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  type AnyPgColumn,
   pgTable,
   uuid,
   text,
@@ -11,6 +12,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
+import { issues } from "./issues.js";
 
 export const agentWakeupRequests = pgTable(
   "agent_wakeup_requests",
@@ -32,9 +34,11 @@ export const agentWakeupRequests = pgTable(
     requestedByActorId: text("requested_by_actor_id"),
     idempotencyKey: text("idempotency_key"),
     runId: uuid("run_id"),
+    issueId: uuid("issue_id").references((): AnyPgColumn => issues.id, { onDelete: "set null" }),
     requestedAt: timestamp("requested_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
+    scheduledAt: timestamp("scheduled_at", { withTimezone: true }),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     error: text("error"),
@@ -88,5 +92,6 @@ export const agentWakeupRequests = pgTable(
       table.companyId,
       sql`(${table.payload} ->> 'issueId')`,
     ),
+    statusScheduledIdx: index("agent_wakeup_requests_status_scheduled_idx").on(table.status, table.scheduledAt),
   }),
 );
