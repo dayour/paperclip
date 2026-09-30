@@ -762,7 +762,7 @@ export function AgentDetail() {
     tab?: string;
     runId?: string;
   }>();
-  const { companies, selectedCompanyId, setSelectedCompanyId } = useCompany();
+  const { companies, loading: companiesLoading, selectedCompanyId, setSelectedCompanyId } = useCompany();
   const { closePanel } = usePanel();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
@@ -801,6 +801,7 @@ export function AgentDetail() {
   });
   const resolvedCompanyId = agent?.companyId ?? selectedCompanyId;
   const canonicalAgentRef = agent ? agentRouteRef(agent) : routeAgentRef;
+  const agentCompanyPrefix = companies.find((company) => company.id === agent?.companyId)?.issuePrefix;
   const agentLookupRef = agent?.id ?? routeAgentRef;
   const resolvedAgentId = agent?.id ?? null;
   const membershipsQuery = useResourceMemberships(resolvedCompanyId);
@@ -957,6 +958,12 @@ export function AgentDetail() {
 
   useEffect(() => {
     if (!agent) return;
+    if (!agentCompanyPrefix) return;
+    if (companyPrefix?.toUpperCase() !== agentCompanyPrefix.toUpperCase()) {
+      const suffix = urlRunId ? `/runs/${urlRunId}` : `/${urlTab ?? "dashboard"}`;
+      navigate(`/${agentCompanyPrefix}/agents/${canonicalAgentRef}${suffix}`, { replace: true });
+      return;
+    }
     if (!urlRunId && urlTab === "channels" && !chatConnectorsLoaded) return;
     if (urlRunId) {
       if (routeAgentRef !== canonicalAgentRef) {
@@ -986,12 +993,12 @@ export function AgentDetail() {
       navigate(`/agents/${canonicalAgentRef}/${canonicalTab}`, { replace: true });
       return;
     }
-  }, [agent, routeAgentRef, canonicalAgentRef, urlRunId, urlTab, activeView, navigate, chatConnectorsLoaded]);
+  }, [agent, agentCompanyPrefix, companyPrefix, routeAgentRef, canonicalAgentRef, urlRunId, urlTab, activeView, navigate, chatConnectorsLoaded]);
 
   useEffect(() => {
-    if (!agent?.companyId || agent.companyId === selectedCompanyId) return;
+    if (!agent?.companyId || routeCompanyId !== agent.companyId || agent.companyId === selectedCompanyId) return;
     setSelectedCompanyId(agent.companyId, { source: "route_sync" });
-  }, [agent?.companyId, selectedCompanyId, setSelectedCompanyId]);
+  }, [agent?.companyId, routeCompanyId, selectedCompanyId, setSelectedCompanyId]);
 
   // Invoke / pause / resume / terminate / duplicate / reset live in the shared
   // AgentActionButtons component. The detail header keeps only "approve" here,
@@ -1193,6 +1200,14 @@ export function AgentDetail() {
   if (isLoading) return <PageSkeleton variant="detail" />;
   if (error) return <p className="text-sm text-destructive">{error.message}</p>;
   if (!agent) return null;
+  if (!agentCompanyPrefix) {
+    return companiesLoading
+      ? <PageSkeleton variant="detail" />
+      : <p className="text-sm text-destructive">Agent company is not available.</p>;
+  }
+  if (companyPrefix?.toUpperCase() !== agentCompanyPrefix.toUpperCase()) {
+    return <PageSkeleton variant="detail" />;
+  }
   if (!urlRunId && !urlTab) {
     return <Navigate to={`/agents/${canonicalAgentRef}/dashboard`} replace />;
   }
